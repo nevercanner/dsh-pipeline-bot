@@ -42,11 +42,15 @@
 
 插件由宿主侧的 Host 半（`lib/*.js`）和浏览器侧 Client 半（`lib/client.js`）组成。
 
-**方式一：装 Release 里的 tgz（推荐）**
+**方式一：装现成的 tgz（推荐，不需要构建）**
 
-1. 打开 [Releases](https://github.com/nevercanner/dsh-pipeline-bot/releases)，下载 `dsh-pipeline-bot-<version>.tgz`
+1. 下载安装包（二选一）：
+   - 仓库内：[`dist/dsh-pipeline-bot-0.2.0.tgz`](./dist/dsh-pipeline-bot-0.2.0.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.2.0.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
+
+> Release 页只做变更记录（本机构建环境的上传通道受限，资产随仓库以 `dist/` 分发）。
 
 **方式二：从源码构建后本地注入**
 

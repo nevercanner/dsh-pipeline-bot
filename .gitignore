@@ -10,8 +10,9 @@ node_modules/
 .e2e*/
 *.log
 
-# 打包产物
+# 打包产物（dist/ 例外：安装包随仓库分发，见 README 的安装说明）
 *.tgz
+!dist/*.tgz
 
 # 编辑器与系统
 .vscode/
