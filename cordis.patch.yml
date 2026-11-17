@@ -1,0 +1,15 @@
+# dsh-pipeline-bot —— 把「项目群聊」挂进 dsh 组合。
+#
+# 两把锁（与 dsh-session-send 同一套设计）：
+#   ① 这里的 enabled —— 插件自身允许工作
+#   ② <projectRoot>/.dsh-pipeline-bot.json 的 enabled —— 这个项目开群
+# ② 由面板/会话行一键写盘并热生效，日常不用碰这个文件。
+#
+# 为什么项目根不写死在这里：patch 是 profile 级的，写死一个项目 = 一次放开所有项目。
+# 项目根由每次调用时的调用者会话 cwd 决定（见 src/index.ts 的 resolveProjectRoot）。
+- insert:
+    - id: dsh-pipeline-bot
+      name: '@dsh-external/dsh-pipeline-bot'
+      config:
+        enabled: true
+        projectConfigName: '.dsh-pipeline-bot.json'

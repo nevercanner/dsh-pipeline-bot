@@ -1,0 +1,21 @@
+# 构建产物（由 npm run build 生成，安装包走 Release 的 tgz）
+lib/
+
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 自检与临时数据
+.selftest-home/
+.e2e*/
+*.log
+
+# 打包产物
+*.tgz
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

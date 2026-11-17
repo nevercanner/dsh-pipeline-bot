@@ -1,0 +1,65 @@
+{
+  "name": "@dsh-external/dsh-pipeline-bot",
+  "version": "0.1.0",
+  "description": "DSH 群聊调度台：把任意多个 DSH 会话（可跨项目）与任意外部 agent 产品放进同一个群，互相 @、互相派活、互相唤醒干活。左侧栏入口 + 群聊面板 + 外部产品桥接。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "icon": "assets/icon.svg",
+  "license": "MIT",
+  "author": "YG",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nevercanner/dsh-pipeline-bot.git"
+  },
+  "homepage": "https://github.com/nevercanner/dsh-pipeline-bot#readme",
+  "bugs": {
+    "url": "https://github.com/nevercanner/dsh-pipeline-bot/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "multi-agent",
+    "group-chat",
+    "agent-orchestration",
+    "agent-bus"
+  ],
+  "files": [
+    "lib",
+    "src",
+    "bin",
+    "assets",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/check.mjs",
+    "verify": "node scripts/build.mjs && node scripts/check.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  }
+}
