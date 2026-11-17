@@ -139,6 +139,21 @@ export function apply(ctx: any, config: Config = {}): void {
    * 现象是「fiber 一直 active，但工具表里一个 pipeline_* 都没有」。
    * 正确做法：把 disposer 作为 inject 回调的返回值，生命周期跟着依赖作用域走。
    */
+  const TOOL_NAMES = ['pipeline_say', 'pipeline_assign', 'pipeline_report', 'pipeline_members']
+
+  /**
+   * 挂工具。返回 disposer，由 `ctx.inject` 回调自己持有。
+   *
+   * ── 两次踩坑，都记在这里 ────────────────────────────────
+   * ① 早先把 `ctx.effect(() => () => dispose())` 写在 inject 回调内部：
+   *    那个 effect 建在回调的瞬时作用域上，回调一返回就被回收，工具刚注册就被拆掉。
+   * ② 热重载时**新旧两个 fiber 会短暂并存**：新实例 register 撞上旧实例留下的同名工具
+   *    → 注册抛错 → 新实例一个都没注册；随后旧 fiber 卸载把旧的也拆掉
+   *    → 结果「reload 后 active，但工具表里 0 个」。
+   *
+   * 所以这里不能"注册一次就完"：注册后自检，缺了就用延时重试（等旧 fiber 先卸），
+   * 并且只在名字确实缺失时才注册，避免自己和自己撞。
+   */
   const mountTools = (): (() => void) => {
     let tools: any
     try {
@@ -150,14 +165,77 @@ export function apply(ctx: any, config: Config = {}): void {
       log.warn('宿主没有 tools 服务，pipeline_* 工具不可用（面板仍可用）')
       return () => {}
     }
-    const disposers = registerBusTools({
-      tools: tools as any,
-      busForCaller: async (exec: any, group?: string) => busFor(group ?? (await busForForCaller(exec))),
-      identityOfCaller: async (exec: any, bus: GroupBus) => identityIn(exec, bus),
-      logger: log,
-    })
-    log.info(`pipeline_* 工具已注册 ${disposers.length} 个`)
+
+    let disposers: Array<() => void> = []
+    let disposed = false
+    const timers: Array<() => void> = []
+
+    const clearTimers = (): void => {
+      for (const cancel of timers.splice(0)) {
+        try {
+          cancel()
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+
+    const mountOnce = (): boolean => {
+      if (disposed) return true
+      // 关键：只有**我自己**注册成功才算成功。
+      // 名字被占着（旧 fiber 还没卸）看起来「齐了」，但那是别人的注册，
+      // 旧 fiber 一卸就全没了 —— 早先这里返回 true 直接停掉重试，于是永远补不上。
+      if (disposers.length > 0) return true
+      const missing = TOOL_NAMES.filter((name) => {
+        try {
+          return tools.get(name) === undefined
+        } catch {
+          return true
+        }
+      })
+      if (missing.length === 0) {
+        // 被别人占着：不算成功，等下一轮重试
+        return false
+      }
+      const fresh = registerBusTools({
+        tools: tools as any,
+        busForCaller: async (exec: any, group?: string) => busFor(group ?? (await busForForCaller(exec))),
+        identityOfCaller: async (exec: any, bus: GroupBus) => identityIn(exec, bus),
+        logger: log,
+      })
+      disposers.push(...fresh)
+      const stillMissing = TOOL_NAMES.filter((name) => {
+        try {
+          return tools.get(name) === undefined
+        } catch {
+          return true
+        }
+      })
+      if (stillMissing.length > 0) {
+        log.warn(`pipeline_* 注册未齐（缺 ${stillMissing.join(',')}），稍后重试`)
+        return false
+      }
+      log.info(`pipeline_* 工具已注册 ${fresh.length} 个`)
+      return true
+    }
+
+    // 立即尝试；不齐就退避重试（旧 fiber 的拆解通常在几十毫秒内完成）
+    if (!mountOnce()) {
+      for (const delay of [200, 600, 1500, 3000]) {
+        const timer = setTimeout(() => {
+          if (disposed) return
+          if (mountOnce()) clearTimers()
+        }, delay)
+        if (typeof timer === 'object' && timer !== null && typeof (timer as any).unref === 'function') {
+          (timer as any).unref()
+        }
+        timers.push(() => clearTimeout(timer))
+      }
+    }
+
     return () => {
+      disposed = true
+      clearTimers()
       for (const dispose of disposers) {
         try {
           dispose()
@@ -165,6 +243,7 @@ export function apply(ctx: any, config: Config = {}): void {
           /* 忽略 */
         }
       }
+      disposers = []
     }
   }
 

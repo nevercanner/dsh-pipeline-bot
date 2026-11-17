@@ -45,8 +45,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.3.0.tgz`](./dist/dsh-pipeline-bot-0.3.0.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.3.0.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.3.1.tgz`](./dist/dsh-pipeline-bot-0.3.1.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.3.1.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 
@@ -206,6 +206,15 @@ npm run verify
 - 每次读成员列表会幂等回填一遍，老成员也会进名册
 - 投递目标不在群里时，按 名字 / 成员 id / 会话标题 / session id 在候选池里匹配，
   命中就**自动认领入群**再投递；确实找不到才报错，并列出可加入的候选
+
+## 热重载安全
+
+宿主热重载时新旧两个 fiber 会短暂并存。同名工具注册会撞车，早先表现为
+「reload 后 fiber active，但工具表里一个 `pipeline_*` 都没有」。
+
+现在注册逻辑是：注册后**自检**四个工具是否真的在表里；缺了就退避重试
+（200/600/1500/3000ms），并且只在**自己**注册成功时才停止重试 ——
+把「名字被别人占着」和「自己挂上了」区分开。
 
 ## 参数健壮性
 
