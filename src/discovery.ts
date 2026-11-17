@@ -20,7 +20,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Candidate, Member, MemberRecord } from './types.ts'
-import { baseName, normalizePath } from './util.ts'
+import { avatarOf, baseName, memberIdOf, normalizePath } from './util.ts'
 
 const MAX_NAME_LENGTH = 16
 /** 明显是「一句话」而不是「一个名字」的开头。 */
@@ -177,9 +177,12 @@ export async function listCandidates(
     const selfName = names.get(row.id)
     const name = selfName ?? nameFromTitle(row.title) ?? row.id.slice(0, 10)
     const cwd = row.cwd === undefined ? undefined : normalizePath(row.cwd)
+    const memberId = memberIdOf(name)
     candidates.push({
       sessionId: row.id,
       name,
+      id: memberId,
+      avatar: avatarOf(memberId, name),
       ...(cwd === undefined ? {} : { cwd, project: baseName(cwd) }),
       status: liveIds.has(row.id) ? 'live' : 'inactive',
       added: false,
@@ -225,10 +228,17 @@ export function resolveMembers(
       record.sessionId !== undefined && record.sessionId !== ''
         ? byId.get(record.sessionId)
         : byName.get(record.name.toLowerCase())
+    const memberId = record.id ?? memberIdOf(record.name)
+    const avatar = avatarOf(memberId, record.name, {
+      ...(record.glyph === undefined ? {} : { glyph: record.glyph }),
+      ...(record.image === undefined ? {} : { image: record.image }),
+    })
     if (record.role === 'external') {
       const extra = extras.find((item) => item.name.toLowerCase() === record.name.toLowerCase())
       out.push({
         name: record.name,
+        id: memberId,
+        avatar,
         sessionId: '',
         role: 'external',
         status: extra?.status ?? 'inactive',
@@ -241,6 +251,8 @@ export function resolveMembers(
     if (candidate === undefined) {
       out.push({
         name: record.name,
+        id: memberId,
+        avatar,
         sessionId: record.sessionId ?? '',
         role: record.role,
         status: 'missing',
@@ -250,6 +262,8 @@ export function resolveMembers(
     }
     out.push({
       name: record.name,
+      id: memberId,
+      avatar,
       sessionId: candidate.sessionId,
       role: record.role,
       status: candidate.status,

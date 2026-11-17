@@ -197,6 +197,62 @@ inbox.length === 1 && inbox[0].reason === 'mention'
   ? ok('外部收件箱只收 @ 自己的消息')
   : bad('外部收件箱筛选不符', JSON.stringify(inbox))
 
+// E. 参数健壮性与成员身份（回归：模型传非字符串参数曾让工具抛 TypeError）
+console.log('E. 参数健壮性与成员身份')
+const { asText, asTextList, memberIdOf, avatarOf, colorOf } = await import(new URL('../lib/util.js', import.meta.url).href)
+
+for (const [label, value] of [
+  ['对象', { group: 'x' }],
+  ['数组', ['a', 'b']],
+  ['null', null],
+  ['undefined', undefined],
+  ['数字', 42],
+]) {
+  let threw = false
+  try {
+    asText(value)
+  } catch {
+    threw = true
+  }
+  threw ? bad(`asText(${label}) 抛错`) : ok(`asText(${label}) 不抛错 → ${JSON.stringify(asText(value)).slice(0, 24)}`)
+}
+asTextList('a').length === 1 && asTextList(['a', { b: 1 }]).length === 2
+  ? ok('asTextList 接受字符串与数组')
+  : bad('asTextList 行为不符')
+
+// 群标识解析：曾经 `(ref ?? '').trim()` 在 ref 为对象时抛 TypeError
+{
+  const storeMod = await import(new URL('../lib/store.js', import.meta.url).href)
+  const g = await storeMod.createGroup('参数健壮群', '组长', 'D:/pA')
+  let threw = false
+  try {
+    // 复刻 index.ts 的解析路径：asText 后再 trim
+    asText({ bad: true }).trim()
+    asText(['x']).trim()
+  } catch {
+    threw = true
+  }
+  threw ? bad('群标识解析对非字符串抛错（就是被报的 TypeError）') : ok('群标识解析对非字符串不抛错')
+  await storeMod.deleteGroup(g.id)
+}
+
+// 成员 id / 头像：稳定且可区分
+const idA = memberIdOf('chapter')
+const idB = memberIdOf('chapter')
+idA === idB ? ok(`成员 id 稳定：${idA}`) : bad('成员 id 不稳定')
+memberIdOf('管线维护') !== memberIdOf('chapter') ? ok('不同成员 id 不同') : bad('成员 id 撞了')
+const av1 = avatarOf('chapter', 'chapter')
+const av2 = avatarOf('chapter', 'chapter')
+av1.color === av2.color && av1.glyph === 'C'
+  ? ok(`头像稳定且取首字：${av1.glyph} ${av1.color}`)
+  : bad('头像不稳定', JSON.stringify([av1, av2]))
+avatarOf('管线维护', '管线维护').glyph === '管' ? ok('中文名取首字作头像') : bad('中文头像不符')
+new Set(['chapter', 'gate', '管线维护', 'mavis'].map((n) => memberIdOf(n))).size === 4
+  ? ok('多成员 id 互不相同')
+  : bad('成员 id 有重复')
+// 显式 emoji 优先
+avatarOf('x', 'x', { glyph: '🐳' }).glyph === '🐳' ? ok('显式 emoji 头像优先') : bad('显式头像未生效')
+
 // D. 双向中继（群之所以是群，而不是某个 agent 的分身）
 console.log('D. 双向中继')
 const { assistantTextOf, installMemberMirror } = await import(new URL('../lib/mirror.js', import.meta.url).href)

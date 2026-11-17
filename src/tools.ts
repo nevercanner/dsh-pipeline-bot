@@ -5,6 +5,7 @@
  * 这让同一批工具服务多个群 —— 群是全局实体，不绑项目。
  */
 import type { GroupBus } from './bus.ts'
+import { asText, asTextList } from './util.ts'
 import type { Candidate, Member } from './types.ts'
 
 export interface ToolIdentity {
@@ -53,7 +54,8 @@ function roster(members: readonly Member[]): string {
       const role = member.role === 'lead' ? '组长' : member.role === 'external' ? `外部·${member.product ?? ''}` : '成员'
       const state = member.status === 'live' ? (member.role === 'external' ? '在线' : '醒着') : member.status === 'inactive' ? '离线' : '无会话'
       const where = member.project === undefined ? '' : ` @${member.project}`
-      return `- ${member.name}（${role}·${state}${where}${member.duty === undefined ? '' : `：${member.duty}`}）`
+      const glyph = member.avatar?.glyph ?? '?'
+      return `- ${glyph} ${member.name}  [id: ${member.id ?? member.name}]（${role}·${state}${where}${member.duty === undefined ? '' : `：${member.duty}`}）`
     })
     .join('\n')
 }
@@ -79,7 +81,7 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
       type: 'object',
       properties: {
         text: { type: 'string', description: '要说的话。@成员名 会唤醒对方' },
-        targets: { type: 'array', items: { type: 'string' }, description: '（可选）显式要唤醒的成员名，可多个' },
+        targets: { type: 'array', items: { type: 'string' }, description: '（可选）显式要唤醒的成员名（名字或成员 id），可多个' },
         silent: { type: 'boolean', description: '（可选）true = 只入群不唤醒' },
         group: { type: 'string', description: '（可选）群标题或 id；不传用当前群' },
       },
@@ -87,14 +89,15 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
     },
     output: { schema: RESULT_SCHEMA, render: renderResult },
     async execute(args: any, exec: any) {
-      const bus = await deps.busForCaller(exec, typeof args?.group === 'string' ? args.group : undefined)
+      const bus = await deps.busForCaller(exec, args?.group)
       const me = await deps.identityOfCaller(exec, bus)
+      const targets = asTextList(args?.targets)
       const result = await bus.speak({
         from: me.name,
         role: me.role,
         kind: 'report',
-        text: String(args?.text ?? ''),
-        ...(Array.isArray(args?.targets) ? { targets: (args.targets as unknown[]).map(String) } : {}),
+        text: asText(args?.text),
+        ...(targets.length === 0 ? {} : { targets }),
         silent: args?.silent === true,
       })
       const woke =
@@ -122,10 +125,10 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
     },
     output: { schema: RESULT_SCHEMA, render: renderResult },
     async execute(args: any, exec: any) {
-      const bus = await deps.busForCaller(exec, typeof args?.group === 'string' ? args.group : undefined)
+      const bus = await deps.busForCaller(exec, args?.group)
       const me = await deps.identityOfCaller(exec, bus)
-      const targets = Array.isArray(args?.targets) ? (args.targets as unknown[]).map(String) : []
-      const result = await bus.assign(String(args?.brief ?? ''), targets, { from: me.name })
+      const targets = asTextList(args?.targets)
+      const result = await bus.assign(asText(args?.brief), targets, { from: me.name })
       const lines = [
         `任务 ${result.task.id} 已派出（状态 ${result.task.status}）。`,
         Object.entries(result.task.deliveries).map(([who, detail]) => `→ ${who}：${detail}`).join('\n'),
@@ -152,11 +155,12 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
     },
     output: { schema: RESULT_SCHEMA, render: renderResult },
     async execute(args: any, exec: any) {
-      const bus = await deps.busForCaller(exec, typeof args?.group === 'string' ? args.group : undefined)
+      const bus = await deps.busForCaller(exec, args?.group)
       const me = await deps.identityOfCaller(exec, bus)
-      const result = await bus.report(String(args?.text ?? ''), {
+      const taskId = asText(args?.taskId).trim()
+      const result = await bus.report(asText(args?.text), {
         from: me.name,
-        ...(typeof args?.taskId === 'string' && args.taskId !== '' ? { taskId: args.taskId } : {}),
+        ...(taskId === '' ? {} : { taskId }),
         silent: args?.silent === true,
       })
       const head = result.task === undefined ? '已交回群里。' : `已挂到任务 ${result.task.id}（状态 ${result.task.status}）。`
@@ -168,7 +172,8 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
   register({
     name: 'pipeline_members',
     description:
-      '列出群成员（名字、组长/成员/外部产品、在不在线、属于哪个项目）以及**可加入的候选会话**（宿主里所有项目）。' +
+      '列出群成员（头像、名字、id、角色、在不在线、属于哪个项目）以及**可加入的候选会话**（宿主里所有项目）。' +
+      '每个成员都有稳定 id（默认等于会话名），@ 名字或 id 都能寻址。' +
       '派活或 @ 人之前先看这里，不要臆造名单外的人。',
     parameters: {
       type: 'object',
@@ -180,7 +185,7 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
     },
     output: { schema: RESULT_SCHEMA, render: renderResult },
     async execute(args: any, exec: any) {
-      const bus = await deps.busForCaller(exec, typeof args?.group === 'string' ? args.group : undefined)
+      const bus = await deps.busForCaller(exec, args?.group)
       const { group, members, candidates } = await bus.members()
       const lines = [`群：${group.title}（${group.id}）`, `组长：${group.leadName}`, '', '群成员：', roster(members)]
       if (args?.candidates === true) {
@@ -188,7 +193,10 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
         lines.push('', `可加入的候选会话（共 ${pending.length} 个）：`)
         lines.push(
           pending
-            .map((candidate: Candidate) => `- ${candidate.name}（${candidate.project ?? '?'}·${candidate.status}）`)
+            .map(
+              (candidate: Candidate) =>
+                `- ${candidate.avatar?.glyph ?? '?'} ${candidate.name}  [id: ${candidate.id}]（${candidate.project ?? '?'}·${candidate.status}）`,
+            )
             .join('\n'),
         )
       }

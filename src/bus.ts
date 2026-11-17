@@ -33,7 +33,7 @@ import {
   upsertTask,
 } from './store.ts'
 import type { Candidate, Group, Member, Message, Task } from './types.ts'
-import { shortRandom } from './util.ts'
+import { asText, asTextList, memberIdOf, shortRandom } from './util.ts'
 
 export interface BusDeps {
   ctx: any
@@ -147,12 +147,17 @@ export class GroupBus {
     return { group, members, candidates }
   }
 
+  /** @名字 / 成员 id / session id 都能寻址（模型常把 id 当名字用）。 */
   resolveMember(members: readonly Member[], ref: string): Member | undefined {
-    const wanted = normalizeName(ref)
-    if (wanted === '') return undefined
+    const raw = asText(ref).trim()
+    if (raw === '') return undefined
+    const wanted = normalizeName(raw)
+    const wantedId = memberIdOf(raw)
     return (
       members.find((member) => normalizeName(member.name) === wanted) ??
-      members.find((member) => member.sessionId === ref) ??
+      members.find((member) => normalizeName(member.id ?? '') === wanted) ??
+      members.find((member) => (member.id ?? '') === wantedId) ??
+      members.find((member) => member.sessionId === raw) ??
       members.find((member) => normalizeName(member.name).startsWith(wanted))
     )
   }
@@ -193,13 +198,13 @@ export class GroupBus {
 
   /** 在群里说话 —— 唯一的公共通道。所有唤醒都从这里出去。 */
   async speak(options: SpeakOptions): Promise<SpeakResult> {
-    const text = String(options.text ?? '').trim()
+    const text = asText(options.text).trim()
     if (text === '') throw new Error('消息为空')
     const group = await this.group()
     const { members } = await this.members()
     const me = this.resolveMember(members, options.from)
     const mentioned = parseMentions(text, members)
-    const explicit = (options.targets ?? []).map((name) => this.resolveMember(members, name)?.name ?? name)
+    const explicit = asTextList(options.targets).map((name) => this.resolveMember(members, name)?.name ?? name)
 
     const wanted: string[] = []
     for (const name of [...explicit, ...mentioned]) {
@@ -226,7 +231,8 @@ export class GroupBus {
 
     const capped = wanted.slice(0, Math.max(1, options.maxWakes ?? 8))
     const appended = await appendMessage(group.id, {
-      from: options.from,
+      from: asText(options.from) || 'system',
+      ...(me === undefined ? {} : { fromId: me.id }),
       role: options.role,
       kind: options.kind ?? (options.role === 'human' ? 'human' : 'report'),
       text,
@@ -328,9 +334,9 @@ export class GroupBus {
     targetNames: readonly string[],
     options: { from?: string; taskId?: string } = {},
   ): Promise<{ task: Task; message: Message; deliveries: DeliveryLine[] }> {
-    const text = String(brief ?? '').trim()
+    const text = asText(brief).trim()
     if (text === '') throw new Error('派活内容为空')
-    const names = targetNames.map((name) => String(name ?? '').trim()).filter((name) => name !== '')
+    const names = asTextList(targetNames)
     if (names.length === 0) throw new Error('没指定派给谁')
 
     const group = await this.group()
@@ -379,10 +385,10 @@ export class GroupBus {
     reportText: string,
     options: { from: string; taskId?: string; silent?: boolean },
   ): Promise<{ task?: Task; message: Message; woke: string[] }> {
-    const text = String(reportText ?? '').trim()
+    const text = asText(reportText).trim()
     if (text === '') throw new Error('回执内容为空')
     const group = await this.group()
-    const author = String(options.from ?? '').trim() || '成员'
+    const author = asText(options.from).trim() || '成员'
     const task = await findTask(group.id, options.taskId)
 
     const spoken = await this.speak({
@@ -436,7 +442,7 @@ export class GroupBus {
     const group = await this.group()
     const author = from ?? group.leadName
     const role = normalizeName(author) === normalizeName(group.leadName) ? 'lead' : 'member'
-    return this.speak({ from: author, role, kind: 'report', text: String(text ?? '').trim(), silent })
+    return this.speak({ from: author, role, kind: 'report', text: asText(text).trim(), silent })
   }
 
   /** 外部产品拉取发给自己的消息。 */
@@ -452,7 +458,15 @@ export class GroupBus {
     return { items, cursor }
   }
 
-  async addMember(member: { name: string; sessionId?: string; duty?: string; product?: string }): Promise<Group> {
+  async addMember(member: {
+    name: string
+    sessionId?: string
+    duty?: string
+    product?: string
+    id?: string
+    glyph?: string
+    image?: string
+  }): Promise<Group> {
     return addMember(this.deps.groupId, member)
   }
 

@@ -115,6 +115,7 @@ window.__ModuleLoader__.load({
         gap: 5,
       },
       dot: { width: 7, height: 7, borderRadius: 999, display: 'inline-block' },
+      idTag: { fontSize: 10, opacity: 0.55, fontFamily: 'monospace' },
       flow: { flex: 1, overflowY: 'auto', padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 },
       row: { display: 'flex', flexDirection: 'column', gap: 3, maxWidth: '86%' },
       meta: { fontSize: 11, opacity: 0.6 },
@@ -165,6 +166,31 @@ window.__ModuleLoader__.load({
 
     const ROLE_COLOR = { lead: '#7c5cff', member: '#2f9e6b', human: '#2f6fdd', system: '#999', external: '#8a5cf6' }
 
+    /** 成员头像：有图片用图片，否则用首字 + 稳定颜色（同一个成员永远同一个样子）。 */
+    function Avatar(props) {
+      const { member, size = 18 } = props
+      const avatar = member?.avatar ?? { glyph: (member?.name ?? '?').slice(0, 1), color: '#6b7a8f' }
+      const base = {
+        width: size,
+        height: size,
+        borderRadius: '50%',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: Math.round(size * 0.55),
+        lineHeight: 1,
+        color: '#fff',
+        background: avatar.color,
+        flex: '0 0 auto',
+        fontWeight: 600,
+        overflow: 'hidden',
+      }
+      if (avatar.image) {
+        return h('img', { src: avatar.image, alt: member.name, style: { ...base, objectFit: 'cover' } })
+      }
+      return h('span', { style: base, title: `${member.name}（id: ${member.id}）` }, avatar.glyph)
+    }
+
     function MemberChip(props) {
       const { member } = props
       const color =
@@ -179,15 +205,24 @@ window.__ModuleLoader__.load({
               : ''
       return h(
         'span',
-        { style: S.chip, title: `${member.sessionId || '(无会话)'}${member.duty ? ` · ${member.duty}` : ''}` },
-        h('span', { style: { ...S.dot, background: color } }),
+        {
+          style: S.chip,
+          title: `id: ${member.id}${member.sessionId ? `
+会话: ${member.sessionId}` : ''}${member.duty ? `
+职责: ${member.duty}` : ''}`,
+        },
+        h(Avatar, { member, size: 16 }),
         member.name,
+        h('code', { style: S.idTag }, member.id),
         tag,
       )
     }
 
     function MessageRow(props) {
-      const { message } = props
+      const { message, members } = props
+      const author =
+        (members ?? []).find((member) => member.id !== undefined && member.id === message.fromId) ??
+        (members ?? []).find((member) => member.name === message.from)
       const isSystem = message.role === 'system'
       const isHuman = message.role === 'human'
       const color = ROLE_COLOR[message.role] ?? '#888'
@@ -196,8 +231,9 @@ window.__ModuleLoader__.load({
         { style: { ...S.row, alignSelf: isHuman ? 'flex-end' : 'flex-start' } },
         h(
           'div',
-          { style: { ...S.meta, color } },
-          `${message.from}${message.targets?.length ? ` → ${message.targets.join('、')}` : ''} · ${new Date(message.ts).toLocaleTimeString()}`,
+          { style: { ...S.meta, color, display: 'flex', alignItems: 'center', gap: 5 } },
+          author ? h(Avatar, { member: author, size: 14 }) : null,
+          `${message.from}${author?.id ? ` · ${author.id}` : ''}${message.targets?.length ? ` → ${message.targets.join('、')}` : ''} · ${new Date(message.ts).toLocaleTimeString()}`,
         ),
         h(
           'div',
@@ -219,7 +255,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [groupRef, setGroupRef] = React.useState('')
       const [tab, setTab] = React.useState('chat')
-      const [newMember, setNewMember] = React.useState({ name: '', sessionId: '', product: '', duty: '' })
+      const [newMember, setNewMember] = React.useState({ name: '', sessionId: '', product: '', duty: '', glyph: '' })
       const [newGroup, setNewGroup] = React.useState('')
       const [projects, setProjects] = React.useState([])
       const [newGroupProject, setNewGroupProject] = React.useState('')
@@ -297,9 +333,10 @@ window.__ModuleLoader__.load({
           if (newMember.sessionId.trim() !== '') payload.sessionId = newMember.sessionId.trim()
           if (newMember.product.trim() !== '') payload.product = newMember.product.trim()
           if (newMember.duty.trim() !== '') payload.duty = newMember.duty.trim()
+          if (newMember.glyph.trim() !== '') payload.glyph = newMember.glyph.trim()
           if (payload.name === '') throw new Error('成员需要名字')
           await postJson('/member', payload)
-          setNewMember({ name: '', sessionId: '', product: '', duty: '' })
+          setNewMember({ name: '', sessionId: '', product: '', duty: '', glyph: '' })
         })
 
       return h(
@@ -373,7 +410,7 @@ window.__ModuleLoader__.load({
               { ref: flowRef, style: S.flow },
               messages.length === 0
                 ? h('div', { style: S.hint }, '还没有消息。不 @ 交给组长；@成员名 会直接唤醒对方（可跨项目）。')
-                : messages.map((message) => h(MessageRow, { key: message.id, message })),
+                : messages.map((message) => h(MessageRow, { key: message.id, message, members })),
             )
           : h(
               'div',
@@ -387,7 +424,7 @@ window.__ModuleLoader__.load({
                     h(
                       'thead',
                       null,
-                      h('tr', null, ['名字', '项目', '状态', ''].map((label) => h('th', { key: label, style: S.cell }, label))),
+                      h('tr', null, ['', '名字', 'id', '项目', '状态', ''].map((label) => h('th', { key: label, style: S.cell }, label))),
                     ),
                     h(
                       'tbody',
@@ -396,7 +433,9 @@ window.__ModuleLoader__.load({
                         h(
                           'tr',
                           { key: candidate.sessionId },
+                          h('td', { style: S.cell }, h(Avatar, { member: candidate, size: 16 })),
                           h('td', { style: S.cell }, candidate.name),
+                          h('td', { style: S.cell }, h('code', { style: S.idTag }, candidate.id ?? candidate.name)),
                           h('td', { style: S.cell }, candidate.project ?? '?'),
                           h('td', { style: S.cell }, candidate.status === 'live' ? '醒着' : '离线'),
                           h(
@@ -416,6 +455,7 @@ window.__ModuleLoader__.load({
                 h('input', { style: { ...S.select, width: 220 }, placeholder: 'sessionId（外部产品留空）', value: newMember.sessionId, onChange: (e) => setNewMember({ ...newMember, sessionId: e.target.value }) }),
                 h('input', { style: { ...S.select, width: 110 }, placeholder: '产品名如 Mavis', value: newMember.product, onChange: (e) => setNewMember({ ...newMember, product: e.target.value }) }),
                 h('input', { style: { ...S.select, width: 140 }, placeholder: '职责（可选）', value: newMember.duty, onChange: (e) => setNewMember({ ...newMember, duty: e.target.value }) }),
+                h('input', { style: { ...S.select, width: 84 }, placeholder: '头像 emoji', value: newMember.glyph, onChange: (e) => setNewMember({ ...newMember, glyph: e.target.value }) }),
                 h('button', { style: S.btn, onClick: () => void addManual() }, '加入群'),
               ),
               h('div', { style: { fontWeight: 600, marginTop: 6 } }, '移除成员'),

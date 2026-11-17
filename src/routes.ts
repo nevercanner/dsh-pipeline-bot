@@ -25,7 +25,7 @@
 import type { GroupBus } from './bus.ts'
 import { inboxFor } from './bridge.ts'
 import * as store from './store.ts'
-import { resolveService } from './util.ts'
+import { asText, asTextList, resolveService } from './util.ts'
 
 export interface RouteDeps {
   ctx: any
@@ -103,11 +103,10 @@ async function readJsonBody(req: any, maxBytes = 512 * 1024): Promise<Record<str
 }
 
 function groupOf(url: URL, body: Record<string, unknown>): string | undefined {
-  const fromQuery = url.searchParams.get('group')
-  if (fromQuery !== null && fromQuery.trim() !== '') return fromQuery.trim()
-  const fromBody = body['group']
-  if (typeof fromBody === 'string' && fromBody.trim() !== '') return fromBody.trim()
-  return undefined
+  const fromQuery = asText(url.searchParams.get('group')).trim()
+  if (fromQuery !== '') return fromQuery
+  const fromBody = asText(body['group']).trim()
+  return fromBody === '' ? undefined : fromBody
 }
 
 export function registerRoutes(deps: RouteDeps): () => void {
@@ -217,9 +216,9 @@ export function registerRoutes(deps: RouteDeps): () => void {
             sendJson(res, 401, { error: { code: 'E_BAD_KEY', message: 'bridgeKey 不匹配' } })
             return
           }
-          const memberName = String(body['member'] ?? '').trim()
+          const memberName = asText(body['member']).trim()
           if (memberName === '') throw new Error('bridge 请求需要 member')
-          const product = String(body['product'] ?? '').trim()
+          const product = asText(body['product']).trim()
 
           if (route === '/bridge/register') {
             await bus.addMember({
@@ -236,9 +235,9 @@ export function registerRoutes(deps: RouteDeps): () => void {
               from: memberName,
               role: 'external',
               kind: 'report',
-              text: String(body['text'] ?? ''),
-              ...(Array.isArray(body['targets']) ? { targets: (body['targets'] as unknown[]).map(String) } : {}),
-              ...(typeof body['taskId'] === 'string' ? { taskId: body['taskId'] } : {}),
+              text: asText(body['text']),
+              ...(asTextList(body['targets']).length === 0 ? {} : { targets: asTextList(body['targets']) }),
+              ...(asText(body['taskId']).trim() === '' ? {} : { taskId: asText(body['taskId']).trim() }),
             })
             sendJson(res, 200, {
               ok: true,
@@ -248,9 +247,10 @@ export function registerRoutes(deps: RouteDeps): () => void {
             return
           }
           if (route === '/bridge/report') {
-            const result = await bus.report(String(body['text'] ?? ''), {
+            const bridgedTaskId = asText(body['taskId']).trim()
+            const result = await bus.report(asText(body['text']), {
               from: memberName,
-              ...(typeof body['taskId'] === 'string' && body['taskId'] !== '' ? { taskId: body['taskId'] } : {}),
+              ...(bridgedTaskId === '' ? {} : { taskId: bridgedTaskId }),
             })
             sendJson(res, 200, { ok: true, task: result.task?.id ?? null, woke: result.woke })
             return
@@ -264,57 +264,70 @@ export function registerRoutes(deps: RouteDeps): () => void {
         }
 
         if (route === '/groups') {
-          const projectRoot = typeof body['projectRoot'] === 'string' ? body['projectRoot'] : undefined
-          const group = await store.createGroup(String(body['title'] ?? ''), String(body['leadName'] ?? ''), projectRoot)
+          const projectRoot = asText(body['projectRoot']).trim()
+          const group = await store.createGroup(
+            asText(body['title']),
+            asText(body['leadName']),
+            projectRoot === '' ? undefined : projectRoot,
+          )
           sendJson(res, 200, { ok: true, group })
           return
         }
         /** 改群的锚定项目（群聊会话会落到该项目的会话列表第一位）。 */
         if (route === '/project') {
           const bus = await deps.busFor(groupOf(url, body))
-          const group = await store.setGroupProject(bus.groupId, String(body['projectRoot'] ?? ''))
+          const group = await store.setGroupProject(bus.groupId, asText(body['projectRoot']))
           sendJson(res, 200, { ok: true, group })
           return
         }
         const bus = await deps.busFor(groupOf(url, body))
         if (route === '/say') {
           const result = await bus.speak({
-            from: typeof body['from'] === 'string' ? body['from'] : '我',
+            from: asText(body['from']).trim() === '' ? '我' : asText(body['from']).trim(),
             role: 'human',
             kind: 'human',
-            text: String(body['text'] ?? ''),
+            text: asText(body['text']),
           })
           sendJson(res, 200, { ok: true, targets: result.targets, deliveries: result.deliveries, note: result.note })
           return
         }
         if (route === '/assign') {
-          const targets = Array.isArray(body['targets']) ? (body['targets'] as unknown[]).map(String) : []
-          const from = typeof body['from'] === 'string' && body['from'].trim() !== '' ? body['from'] : undefined
-          const result = await bus.assign(String(body['brief'] ?? ''), targets, from === undefined ? {} : { from })
+          const targets = asTextList(body['targets'])
+          const from = asText(body['from']).trim()
+          const result = await bus.assign(asText(body['brief']), targets, from === '' ? {} : { from })
           sendJson(res, 200, { ok: true, task: result.task })
           return
         }
         if (route === '/member') {
-          const action = String(body['action'] ?? 'add')
+          const action = asText(body['action']).trim() || 'add'
           if (action === 'remove') {
-            const group = await bus.removeMember(String(body['name'] ?? body['sessionId'] ?? ''))
+            const group = await bus.removeMember(asText(body['name']) || asText(body['sessionId'] as string))
             sendJson(res, 200, { ok: true, members: group.members })
             return
           }
-          const memberName = String(body['name'] ?? '').trim()
-          const sessionId = String(body['sessionId'] ?? '').trim()
+          const memberName = asText(body['name']).trim()
+          const sessionId = asText(body['sessionId']).trim()
           if (memberName === '') throw new Error('添加成员需要 name')
+          const duty = asText(body['duty']).trim()
+          const product = asText(body['product']).trim()
+          const explicitId = asText(body['id']).trim()
+          const glyph = asText(body['glyph']).trim()
+          const image = asText(body['image']).trim()
           const group = await bus.addMember({
             name: memberName,
             ...(sessionId === '' ? {} : { sessionId }),
-            ...(typeof body['duty'] === 'string' && body['duty'].trim() !== '' ? { duty: body['duty'] } : {}),
-            ...(typeof body['product'] === 'string' && body['product'].trim() !== '' ? { product: body['product'] } : {}),
+            ...(duty === '' ? {} : { duty }),
+            ...(product === '' ? {} : { product }),
+            ...(explicitId === '' ? {} : { id: explicitId }),
+            ...(glyph === '' ? {} : { glyph }),
+            ...(image === '' ? {} : { image }),
           })
           sendJson(res, 200, { ok: true, members: group.members })
           return
         }
         if (route === '/room') {
-          const preferred = typeof body['projectRoot'] === 'string' ? body['projectRoot'] : undefined
+          const preferredRaw = asText(body['projectRoot']).trim()
+          const preferred = preferredRaw === '' ? undefined : preferredRaw
           const sessionId = await bus.ensureRoomSession(preferred)
           const group = await bus.group()
           sendJson(res, 200, {
@@ -335,7 +348,7 @@ export function registerRoutes(deps: RouteDeps): () => void {
           return
         }
         if (route === '/rename') {
-          const group = await store.renameGroup(bus.groupId, String(body['title'] ?? ''))
+          const group = await store.renameGroup(bus.groupId, asText(body['title']))
           sendJson(res, 200, { ok: true, group })
           return
         }

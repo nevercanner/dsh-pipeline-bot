@@ -16,6 +16,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { newBridgeKey } from './bridge.ts'
+import { asText, memberIdOf } from './util.ts'
 import { DEFAULT_GROUP_TITLE, DEFAULT_LEAD_NAME } from './types.ts'
 import type { Group, MemberRecord, Message, Task } from './types.ts'
 import { baseName, shortRandom, stableId } from './util.ts'
@@ -257,34 +258,59 @@ export async function addMember(
 ): Promise<Group> {
   const store = await load()
   const group = store.groups[groupId] ?? (await defaultGroup())
-  const name = member.name.trim()
+  // 全部外部输入先过 asText：模型/HTTP 可能给对象或数组，直接 .trim() 会 TypeError
+  const name = asText(member.name).trim()
   if (name === '') throw new Error('成员需要名字')
+  const sessionIdIn = asText(member.sessionId).trim()
+  const product = asText(member.product).trim()
+  const duty = asText(member.duty).trim()
+  const glyph = asText(member.glyph).trim()
+  const image = asText(member.image).trim()
+
   const duplicated = group.members.some(
     (item) =>
-      (member.sessionId !== undefined && member.sessionId !== '' && item.sessionId === member.sessionId) ||
-      item.name.trim().toLowerCase() === name.toLowerCase(),
+      (sessionIdIn !== '' && item.sessionId === sessionIdIn) ||
+      asText(item.name).trim().toLowerCase() === name.toLowerCase(),
   )
-  if (!duplicated) {
-    group.members.push({
-      name,
-      ...(member.sessionId === undefined || member.sessionId === '' ? {} : { sessionId: member.sessionId }),
-      role: member.role ?? (member.product === undefined ? 'worker' : 'external'),
-      ...(member.duty === undefined ? {} : { duty: member.duty }),
-      ...(member.product === undefined ? {} : { product: member.product }),
-      addedAt: Date.now(),
-    })
-    group.updatedAt = Date.now()
-    await flush(store)
+  if (duplicated) return group
+
+  // 稳定且唯一的 id：默认 = 会话名（用户重置的名字），撞了就加 -2/-3
+  const base = memberIdOf(asText(member.id).trim() === '' ? name : asText(member.id).trim())
+  let id = base
+  let suffix = 2
+  while (group.members.some((item) => (item.id ?? memberIdOf(item.name)) === id)) {
+    id = `${base}-${suffix}`
+    suffix += 1
+    if (suffix > 99) break
   }
+
+  group.members.push({
+    name,
+    id,
+    ...(sessionIdIn === '' ? {} : { sessionId: sessionIdIn }),
+    role: member.role ?? (product === '' ? 'worker' : 'external'),
+    ...(duty === '' ? {} : { duty }),
+    ...(product === '' ? {} : { product }),
+    ...(glyph === '' ? {} : { glyph }),
+    ...(image === '' ? {} : { image }),
+    addedAt: Date.now(),
+  })
+  group.updatedAt = Date.now()
+  await flush(store)
   return group
 }
 
 export async function removeMember(groupId: string, ref: string): Promise<Group> {
   const store = await load()
   const group = store.groups[groupId] ?? (await defaultGroup())
-  const wanted = ref.trim().toLowerCase()
+  const raw = asText(ref).trim()
+  const wanted = raw.toLowerCase()
+  const wantedId = memberIdOf(raw)
   group.members = group.members.filter(
-    (member) => member.sessionId !== ref && member.name.trim().toLowerCase() !== wanted,
+    (member) =>
+      member.sessionId !== raw &&
+      asText(member.name).trim().toLowerCase() !== wanted &&
+      (member.id ?? memberIdOf(member.name)) !== wantedId,
   )
   group.updatedAt = Date.now()
   await flush(store)

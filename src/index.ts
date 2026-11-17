@@ -31,7 +31,7 @@ import { registerRoutes } from './routes.ts'
 import { registerBusTools } from './tools.ts'
 import * as store from './store.ts'
 import type { Member } from './types.ts'
-import { resolveService } from './util.ts'
+import { asText, resolveService } from './util.ts'
 
 export const name = '@dsh-external/dsh-pipeline-bot'
 export const description =
@@ -72,8 +72,11 @@ export function apply(ctx: any, config: Config = {}): void {
   const buses = new Map<string, GroupBus>()
 
   /** 把「群标识（id / 标题 / 空）」解析成真实群 id。 */
-  const resolveGroupId = async (ref: string | undefined): Promise<string> => {
-    const wanted = (ref ?? '').trim()
+  const resolveGroupId = async (ref: unknown): Promise<string> => {
+    // 模型可能把 group 参数传成对象/数组。这里必须先转文本 ——
+    // 早先 `(ref ?? '').trim()` 直接抛 `(ref ?? "").trim is not a function`，
+    // 表现为 pipeline_say / pipeline_members 两个工具同时"坏掉"。
+    const wanted = asText(ref).trim()
     if (wanted === '') return (await store.defaultGroup()).id
     const groups = await store.listGroups()
     const exact = groups.find((item) => item.id === wanted)
@@ -85,7 +88,7 @@ export function apply(ctx: any, config: Config = {}): void {
     return (await store.defaultGroup()).id
   }
 
-  const busFor = async (ref?: string): Promise<GroupBus> => {
+  const busFor = async (ref?: unknown): Promise<GroupBus> => {
     const groupId = await resolveGroupId(ref)
     const existing = buses.get(groupId)
     if (existing !== undefined) return existing

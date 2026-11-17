@@ -19,6 +19,13 @@ export type MemberStatus = 'live' | 'inactive' | 'missing'
 export interface Member {
   /** 群里 @ 用的名字（群里唯一）。 */
   name: string
+  /**
+   * 成员 id：稳定、唯一、可寻址。
+   * 默认 = 会话标题（即你给会话起的名字），重名时自动加后缀。
+   */
+  id: string
+  /** 头像：显式 emoji/图片，或由 id 稳定推导的首字 + 颜色。 */
+  avatar: { glyph: string; color: string; image?: string }
   /** DSH 会话 id；外部产品为空。 */
   sessionId: string
   role: MemberRole
@@ -40,6 +47,12 @@ export interface Member {
 /** 群成员登记（持久化形态：只记「谁在群里」，状态每次现算）。 */
 export interface MemberRecord {
   name: string
+  /** 成员 id（默认 = name；加入时定下来，改名不改 id）。 */
+  id?: string
+  /** 显式头像（emoji）；不填则用首字 + 稳定颜色。 */
+  glyph?: string
+  /** 显式头像图片 URL。 */
+  image?: string
   /** DSH 会话 id；外部产品留空。 */
   sessionId?: string
   role: Exclude<MemberRole, never>
@@ -55,6 +68,8 @@ export interface Message {
   ts: number
   /** 发言人名字；`system` 表示系统事件。 */
   from: string
+  /** 发言人成员 id（有头像的一方才有值）。 */
+  fromId?: string
   role: 'lead' | 'member' | 'human' | 'system' | 'external'
   text: string
   kind: 'human' | 'assign' | 'report' | 'system' | 'wake'
@@ -120,6 +135,10 @@ export interface Candidate {
   sessionId: string
   /** 建议名字（标题 / 自注册名）。 */
   name: string
+  /** 建议 id（默认取名字）。 */
+  id: string
+  /** 该候选的头像（由 id 推导）。 */
+  avatar: { glyph: string; color: string }
   cwd?: string
   project?: string
   status: 'live' | 'inactive'
