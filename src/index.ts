@@ -25,6 +25,8 @@
  */
 import { GroupBus, normalizeName } from './bus.ts'
 import { collectNames } from './discovery.ts'
+import { installMemberMirror } from './mirror.ts'
+import { installRoomRelay } from './relay.ts'
 import { registerRoutes } from './routes.ts'
 import { registerBusTools } from './tools.ts'
 import * as store from './store.ts'
@@ -149,6 +151,81 @@ export function apply(ctx: any, config: Config = {}): void {
     }
   }
 
+  /**
+   * 双向中继：让群成为**真正的频道**，而不是组长的分身。
+   *
+   *   成员会话里的 assistant 回复 → 写进群（mirror.ts）
+   *   群聊会话里人打的字       → 分派并唤醒成员（relay.ts）
+   *
+   * 两者合起来，群里看到的是每个成员各自说的话；群聊会话本身不跑模型。
+   */
+  const installRelay = (): void => {
+    const groupsOfSession = async (sessionId: string): Promise<string[]> => {
+      const ids: string[] = []
+      for (const item of await store.listGroups()) {
+        const group = await store.getGroup(item.id)
+        if (group.roomSessionId === sessionId && sessionId !== '') continue
+        if (group.members.some((member) => member.sessionId === sessionId)) ids.push(group.id)
+      }
+      return ids
+    }
+    const roomOfGroup = async (groupId: string): Promise<string> => {
+      const group = await store.getGroup(groupId)
+      return group.roomSessionId ?? ''
+    }
+    const groupOfRoom = async (sessionId: string): Promise<string | undefined> => {
+      for (const item of await store.listGroups()) {
+        const group = await store.getGroup(item.id)
+        if (group.roomSessionId !== undefined && group.roomSessionId === sessionId) return group.id
+      }
+      return undefined
+    }
+
+    const mirror = installMemberMirror({
+      ctx,
+      groupsOfSession,
+      roomOfGroup,
+      async record(sessionId, groupId, text, seq) {
+        const group = await store.getGroup(groupId)
+        const member = group.members.find((item) => item.sessionId === sessionId)
+        const name = member?.name ?? `会话${sessionId.slice(8, 14)}`
+        const role = member?.role === 'lead' ? 'lead' : member?.role === 'external' ? 'external' : 'member'
+        await store.appendMessage(groupId, {
+          from: name,
+          role,
+          kind: 'report',
+          text,
+          id: `member-${sessionId}-${seq}`,
+        })
+        const room = group.roomSessionId ?? ''
+        if (room !== '') {
+          const { postToRoom } = await import('./room.ts')
+          await postToRoom({ ctx, logger: log }, room, `【${name}】${text}`)
+        }
+      },
+      logger: log,
+    })
+
+    const relay = installRoomRelay({
+      ctx,
+      groupOfRoom,
+      async dispatch(groupId, text) {
+        const bus = await busFor(groupId)
+        const result = await bus.speak({ from: '我', role: 'human', kind: 'human', text })
+        return { targets: result.targets }
+      },
+      logger: log,
+    })
+
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => () => {
+        mirror.dispose()
+        relay.dispose()
+      }, 'pipeline-bot: relay')
+    }
+    log.info('双向中继已安装（成员回复进群；群聊会话输入分派给成员）')
+  }
+
   /** 不指定群时：优先「调用者所在的群」，否则默认群。 */
   const busForForCaller = async (exec: any): Promise<GroupBus> => {
     const sessionId = String(exec?.agent?.id ?? '')
@@ -168,6 +245,8 @@ export function apply(ctx: any, config: Config = {}): void {
   } else {
     mountTools()
   }
+
+  installRelay()
 
   // ── HTTP：面板 + 外部产品桥接 ──
   registerRoutes({

@@ -197,6 +197,74 @@ inbox.length === 1 && inbox[0].reason === 'mention'
   ? ok('外部收件箱只收 @ 自己的消息')
   : bad('外部收件箱筛选不符', JSON.stringify(inbox))
 
+// D. 双向中继（群之所以是群，而不是某个 agent 的分身）
+console.log('D. 双向中继')
+const { assistantTextOf, installMemberMirror } = await import(new URL('../lib/mirror.js', import.meta.url).href)
+const { humanTextOf, installRoomRelay } = await import(new URL('../lib/relay.js', import.meta.url).href)
+
+assistantTextOf({ data: { message: { content: [{ type: 'text', text: '我改完了' }] } } }) === '我改完了'
+  ? ok('成员回复正文可抽取')
+  : bad('成员回复正文抽取失败')
+assistantTextOf({ data: { message: { content: [{ type: 'tool-call', name: 'x' }] } } }) === undefined
+  ? ok('纯工具调用不算发言')
+  : bad('纯工具调用被当成发言')
+
+humanTextOf([{ source: { kind: 'user' }, content: [{ type: 'text', text: '@gate 复核' }] }]) === '@gate 复核'
+  ? ok('群会话里人的输入可抽取')
+  : bad('人的输入抽取失败')
+humanTextOf([{ source: { kind: 'user', origin: 'dsh-pipeline-bot' }, content: [{ type: 'text', text: '镜像' }] }]) === undefined
+  ? ok('插件自己灌入的镜像消息被跳过（不会自我分派）')
+  : bad('镜像消息未被跳过', '会导致无限循环')
+
+// mirror：假 ctx 收集监听器，喂一条成员事件
+const listeners = {}
+const fakeCtx = { on(name, fn) { listeners[name] = fn; return () => { delete listeners[name] } } }
+const recorded = []
+const mirror = installMemberMirror({
+  ctx: fakeCtx,
+  groupsOfSession: async () => ['g1'],
+  roomOfGroup: async () => 'room-1',
+  record: async (sessionId, groupId, text) => { recorded.push({ sessionId, groupId, text }) },
+})
+listeners['session/event'](
+  { header: { id: 's-b' } },
+  { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: '收到' }] } } },
+)
+await new Promise((r) => setTimeout(r, 50))
+recorded.length === 1 && recorded[0].text === '收到'
+  ? ok('成员会话的回复被写进群')
+  : bad('镜像未写入群', JSON.stringify(recorded))
+// 同一事件重复投递只记一次
+listeners['session/event'](
+  { header: { id: 's-b' } },
+  { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: '收到' }] } } },
+)
+await new Promise((r) => setTimeout(r, 50))
+recorded.length === 1 ? ok('同一 event 不重复镜像') : bad('重复镜像', String(recorded.length))
+mirror.dispose()
+
+// relay：群会话的 pre-step 必须被 reject（不跑模型），且分派给人
+let dispatchedText = null
+const relay = installRoomRelay({
+  ctx: fakeCtx,
+  groupOfRoom: async (id) => (id === 'room-1' ? 'g1' : undefined),
+  dispatch: async (_g, text) => { dispatchedText = text; return { targets: ['gate'] } },
+})
+const decision = await listeners['agent/pre-step'](
+  { agent: { id: 'room-1' }, messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '@gate 复核' }] }], turn: 1, step: 1 },
+  async () => ({ kind: 'enter', messages: [] }),
+)
+decision?.kind === 'reject' && dispatchedText === '@gate 复核'
+  ? ok('群会话输入被分派，且不跑自身模型（reject）')
+  : bad('群会话中继行为不符', `decision=${decision?.kind} dispatched=${dispatchedText}`)
+// 非群会话不拦截
+const passthrough = await listeners['agent/pre-step'](
+  { agent: { id: 's-other' }, messages: [], turn: 1, step: 1 },
+  async () => ({ kind: 'enter', messages: ['x'] }),
+)
+passthrough?.kind === 'enter' ? ok('普通会话不受影响') : bad('普通会话被误拦截')
+relay.dispose()
+
 // 清理自检数据
 const { rmSync } = await import('node:fs')
 rmSync(process.env.DSH_HOME, { recursive: true, force: true })

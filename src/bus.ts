@@ -249,7 +249,8 @@ export class GroupBus {
         continue
       }
       if (member.sessionId === '') {
-        deliveries.push({ name: member.name, sessionId: '', detail: '没有绑定会话（未登记/已失效）', ok: false, outcome: 'absent' })
+        // 没有绑定会话的成员（例如只在元数据里占位的组长）不投递、也不刷一条失败提示：
+        // 每条消息都提醒一次「未投递」纯噪音，人看一眼成员列表就知道它离线。
         continue
       }
       const body = this.composeWake({ options, member, members, text, group, taskId: options.taskId })
