@@ -120,7 +120,9 @@ export function apply(ctx: any, config: Config = {}): void {
     const names = await collectNames(ctx).catch(() => new Map<string, string>())
     const selfName = sessionId === '' ? undefined : names.get(sessionId)
     const group = await bus.group()
-    const fallback = selfName ?? (title.trim() === '' ? `会话${sessionId.slice(0, 8)}` : title.trim().slice(0, 14))
+    // session id 自带 `session-` 前缀；直接 slice 会拼出「会话session-」这种名字
+    const shortId = sessionId.replace(/^session-/, '').slice(0, 6)
+    const fallback = selfName ?? (title.trim() === '' ? `会话${shortId}` : title.trim().slice(0, 14))
     return {
       name: fallback,
       role: normalizeName(fallback) === normalizeName(group.leadName) ? 'lead' : 'member',
@@ -191,7 +193,7 @@ export function apply(ctx: any, config: Config = {}): void {
       async record(sessionId, groupId, text, seq) {
         const group = await store.getGroup(groupId)
         const member = group.members.find((item) => item.sessionId === sessionId)
-        const name = member?.name ?? `会话${sessionId.slice(8, 14)}`
+        const name = member?.name ?? `会话${sessionId.replace(/^session-/, '').slice(0, 6)}`
         const role = member?.role === 'lead' ? 'lead' : member?.role === 'external' ? 'external' : 'member'
         await store.appendMessage(groupId, {
           from: name,

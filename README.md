@@ -45,8 +45,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.2.1.tgz`](./dist/dsh-pipeline-bot-0.2.1.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.2.1.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.2.2.tgz`](./dist/dsh-pipeline-bot-0.2.2.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.2.2.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 
@@ -175,6 +175,20 @@ npm run verify
 协作行为（成员发现、路由、跨项目唤醒、外部降级、回执闭环、无重复唤醒、
 锚定项目、不存在的项目必须报错）→ 双向中继（成员回复进群、群会话输入被分派
 且不跑模型、镜像消息不自我分派、同事件不重复镜像）。
+
+## 寻址：群名册与会话总线名册保持一致
+
+群成员名来自会话标题（如「创建一个带左侧栏入口的 DSH」），而 `dsh-session-send`
+的名册只认已报名（`dsh_bus_register`）的名字或 session id。两套各说各话时，
+会出现「群里明明有这个人，`dsh_bus_send` 却说目标不存在」。
+
+现在：
+
+- 成员加入群时，`{ sessionId: name }` 会被写进**该成员所属项目**的
+  `.dsh-bus/names.json`（只补空位，**不覆盖**对方自己报的名）
+- 每次读成员列表会幂等回填一遍，老成员也会进名册
+- 投递目标不在群里时，按 名字 / 成员 id / 会话标题 / session id 在候选池里匹配，
+  命中就**自动认领入群**再投递；确实找不到才报错，并列出可加入的候选
 
 ## 参数健壮性
 

@@ -20,6 +20,7 @@
 import { inboxFor } from './bridge.ts'
 import { deliver, isLive } from './deliver.ts'
 import { collectNames, listCandidates, resolveMembers } from './discovery.ts'
+import { syncName } from './names.ts'
 import { ensureRoom, postToRoom } from './room.ts'
 import {
   addMember,
@@ -140,6 +141,16 @@ export class GroupBus {
       if (member.role === 'external' || member.sessionId === '') continue
       member.status = isLive(this.deps.ctx, member.sessionId) ? 'live' : 'inactive'
     }
+    // 幂等回填：老成员也要进总线名册，否则「群里叫什么、总线搜不到什么」
+    for (const member of members) {
+      if (member.sessionId === '' || member.cwd === undefined) continue
+      await syncName(
+        this.deps.logger === undefined ? {} : { logger: this.deps.logger },
+        member.cwd,
+        member.sessionId,
+        member.name,
+      )
+    }
     const addedIds = new Set(members.map((member) => member.sessionId).filter((id) => id !== ''))
     const addedNames = new Set(members.map((member) => normalizeName(member.name)))
     const candidates = pool.candidates.map((candidate) => ({
@@ -147,6 +158,47 @@ export class GroupBus {
       added: addedIds.has(candidate.sessionId) || addedNames.has(normalizeName(candidate.name)),
     }))
     return { group, members, candidates }
+  }
+
+  /**
+   * 解析一个投递目标；**不在群里但宿主里能找到**时自动认领入群。
+   *
+   * 为什么需要：组长看到的是会话标题（「创建一个带左侧栏入口的 DSH」），
+   * 它未必已经在成员列表里 —— 早先会直接报「群里没有这些成员」，
+   * 于是组长退回 dsh_bus_send，又撞上另一套名册（目标不存在）。
+   * 现在按 名字 / 成员 id / 会话标题 / session id 依次匹配候选池，
+   * 命中就加入群并写一条可核对的系统消息，然后正常投递。
+   */
+  private async adoptTarget(
+    members: Member[],
+    candidates: readonly Candidate[],
+    ref: string,
+  ): Promise<Member | undefined> {
+    const found = this.resolveMember(members, ref)
+    if (found !== undefined) return found
+    const raw = asText(ref).trim()
+    if (raw === '') return undefined
+    const wanted = normalizeName(raw)
+    const candidate =
+      candidates.find((item) => item.sessionId === raw) ??
+      candidates.find((item) => normalizeName(item.name) === wanted) ??
+      candidates.find((item) => normalizeName(item.id) === wanted) ??
+      candidates.find((item) => normalizeName(item.name).includes(wanted))
+    if (candidate === undefined) return undefined
+    const group = await addMember(this.deps.groupId, {
+      name: candidate.name,
+      sessionId: candidate.sessionId,
+      id: candidate.id,
+    })
+    void syncName(
+      this.deps.logger === undefined ? {} : { logger: this.deps.logger },
+      candidate.cwd ?? '',
+      candidate.sessionId,
+      candidate.name,
+    )
+    const member = await this.members()
+    void group
+    return this.resolveMember(member.members, candidate.name)
   }
 
   /** @名字 / 成员 id / session id 都能寻址（模型常把 id 当名字用）。 */
@@ -203,17 +255,21 @@ export class GroupBus {
     const text = asText(options.text).trim()
     if (text === '') throw new Error('消息为空')
     const group = await this.group()
-    const { members } = await this.members()
+    const { members, candidates } = await this.members()
     const me = this.resolveMember(members, options.from)
     const mentioned = parseMentions(text, members)
     const explicit = asTextList(options.targets).map((name) => this.resolveMember(members, name)?.name ?? name)
 
     const wanted: string[] = []
+    // 认领会改变成员集合，所以把解析结果按名字存下来给投递阶段用 ——
+    // 否则投递时拿旧 members 再 resolve 一次会得到 undefined（实测崩在 member.role）。
+    const resolved = new Map<string, Member>()
     for (const name of [...explicit, ...mentioned]) {
-      const member = this.resolveMember(members, name)
+      const member = await this.adoptTarget(members, candidates, name)
       if (member === undefined) continue
       if (member.sessionId !== '' && me?.sessionId === member.sessionId) continue
       if (member.name === me?.name) continue
+      resolved.set(member.name, member)
       if (!wanted.includes(member.name)) wanted.push(member.name)
     }
 
@@ -245,7 +301,8 @@ export class GroupBus {
 
     const deliveries: DeliveryLine[] = []
     for (const name of capped) {
-      const member = this.resolveMember(members, name)!
+      const member = resolved.get(name) ?? this.resolveMember(members, name)
+      if (member === undefined) continue
       if (member.role === 'external') {
         deliveries.push({
           name: member.name,
@@ -342,15 +399,26 @@ export class GroupBus {
     if (names.length === 0) throw new Error('没指定派给谁')
 
     const group = await this.group()
-    const { members } = await this.members()
+    const { members, candidates } = await this.members()
     const resolved: Member[] = []
     const unknown: string[] = []
     for (const name of names) {
-      const member = this.resolveMember(members, name)
+      const member = await this.adoptTarget(members, candidates, name)
       if (member === undefined) unknown.push(name)
       else if (!resolved.some((item) => item.name === member.name)) resolved.push(member)
     }
-    if (unknown.length > 0) throw new Error(`群里没有这些成员：${unknown.join('、')}。先 pipeline_members 看名单。`)
+    if (unknown.length > 0) {
+      const hint = candidates
+        .filter((item) => !item.added)
+        .slice(0, 8)
+        .map((item) => item.name)
+        .join('、')
+      throw new Error(
+        `找不到这些成员：${unknown.join('、')}。群里也没有同样名字的会话` +
+          (hint === '' ? '（宿主里没有可加入的候选会话）' : `；可加入的还有：${hint}`) +
+          '。用 pipeline_members 看完整名单。',
+      )
+    }
 
     const author = options.from ?? group.leadName
     const now = Date.now()
@@ -469,7 +537,22 @@ export class GroupBus {
     glyph?: string
     image?: string
   }): Promise<Group> {
-    return addMember(this.deps.groupId, member)
+    const group = await addMember(this.deps.groupId, member)
+    // 同步到会话总线名册：让 dsh_bus_* 也能用群里的同一个名字寻址
+    const sessionId = asText(member.sessionId).trim()
+    if (sessionId !== '') {
+      const { members } = await this.members()
+      const target = members.find((item) => item.sessionId === sessionId)
+      if (target?.cwd !== undefined) {
+        await syncName(
+          this.deps.logger === undefined ? {} : { logger: this.deps.logger },
+          target.cwd,
+          sessionId,
+          target.name,
+        )
+      }
+    }
+    return group
   }
 
   async removeMember(ref: string): Promise<Group> {

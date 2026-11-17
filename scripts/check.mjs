@@ -253,6 +253,49 @@ new Set(['chapter', 'gate', '管线维护', 'mavis'].map((n) => memberIdOf(n))).
 // 显式 emoji 优先
 avatarOf('x', 'x', { glyph: '🐳' }).glyph === '🐳' ? ok('显式 emoji 头像优先') : bad('显式头像未生效')
 
+// F. 寻址一致性：群名册 ↔ 会话总线名册；不在群里的目标按标题自动认领
+console.log('F. 寻址一致性')
+const { syncName } = await import(new URL('../lib/names.js', import.meta.url).href)
+{
+  const { mkdirSync, writeFileSync, readFileSync, rmSync } = await import('node:fs')
+  const tmpProject = join(root, '.selftest-names')
+  mkdirSync(join(tmpProject, '.dsh-bus'), { recursive: true })
+  writeFileSync(join(tmpProject, '.dsh-bus', 'names.json'), JSON.stringify({ 'session-keep': { name: '已报名' } }), 'utf8')
+  const wrote = await syncName({}, tmpProject, 'session-new', 'chapter')
+  const wrote2 = await syncName({}, tmpProject, 'session-keep', '别的名字')
+  const names = JSON.parse(readFileSync(join(tmpProject, '.dsh-bus', 'names.json'), 'utf8'))
+  wrote && names['session-new']?.name === 'chapter'
+    ? ok('群成员名写进总线名册（dsh_bus_* 可用同一名字寻址）')
+    : bad('名册未写入', JSON.stringify(names))
+  wrote2 === false && names['session-keep'].name === '已报名'
+    ? ok('不覆盖对方自己报的名')
+    : bad('名册被覆盖', JSON.stringify(names['session-keep']))
+  rmSync(tmpProject, { recursive: true, force: true })
+}
+
+// 不在群里的目标：按会话标题自动认领
+{
+  const storeMod = await import(new URL('../lib/store.js', import.meta.url).href)
+  const g2 = await storeMod.createGroup('认领测试群', '组长', 'D:/pA')
+  const bus2 = new GroupBus({ ctx, groupId: g2.id, logger: { info() {}, warn() {} } })
+  const spoke = await bus2.speak({ from: '我', role: 'human', text: '开始', targets: ['gate'] })
+  const after = await storeMod.getGroup(g2.id)
+  const adopted = after.members.some((m) => m.name === 'gate')
+  spoke.targets.includes('gate') && adopted
+    ? ok('目标不在群里时按标题自动认领并投递')
+    : bad('自动认领失败', `targets=${spoke.targets} adopted=${adopted}`)
+  let errored = ''
+  try {
+    await bus2.assign('做点事', ['根本不存在的人'], { from: '组长' })
+  } catch (error) {
+    errored = String(error?.message ?? error)
+  }
+  errored.includes('找不到') && errored.includes('可加入')
+    ? ok('确实找不到时给出可加入候选，而不是 TypeError')
+    : bad('找不到目标的报错不友好', errored)
+  await storeMod.deleteGroup(g2.id)
+}
+
 // D. 双向中继（群之所以是群，而不是某个 agent 的分身）
 console.log('D. 双向中继')
 const { assistantTextOf, installMemberMirror } = await import(new URL('../lib/mirror.js', import.meta.url).href)
