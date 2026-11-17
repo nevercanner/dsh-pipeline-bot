@@ -300,6 +300,37 @@ export async function addMember(
   return group
 }
 
+/**
+ * 回填成员 id：老数据只有 name，没有 id。
+ * 一次性写进记录，保证「id 加入时定下、之后改名也不变」——
+ * 否则 @ 一个改过名的成员会因为 id 重新推导而失配。
+ */
+export async function ensureMemberIds(groupId: string): Promise<void> {
+  const store = await load()
+  const group = store.groups[groupId]
+  if (group === undefined) return
+  let changed = false
+  const used = new Set<string>()
+  for (const member of group.members) {
+    if (member.id === undefined || member.id === '') {
+      const base = memberIdOf(member.name)
+      let id = base
+      let suffix = 2
+      while (used.has(id)) {
+        id = `${base}-${suffix}`
+        suffix += 1
+      }
+      member.id = id
+      changed = true
+    }
+    used.add(member.id)
+  }
+  if (changed) {
+    group.updatedAt = Date.now()
+    await flush(store)
+  }
+}
+
 export async function removeMember(groupId: string, ref: string): Promise<Group> {
   const store = await load()
   const group = store.groups[groupId] ?? (await defaultGroup())

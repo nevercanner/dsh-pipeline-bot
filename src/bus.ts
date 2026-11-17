@@ -25,6 +25,7 @@ import {
   addMember,
   appendMessage,
   clearMessages,
+  ensureMemberIds,
   findTask,
   getGroup,
   removeMember,
@@ -111,6 +112,7 @@ export class GroupBus {
 
   /** 候选池 + 成员（现算在线状态）。 */
   async members(): Promise<{ group: Group; members: Member[]; candidates: Candidate[] }> {
+    await ensureMemberIds(this.deps.groupId)
     const group = await this.group()
     const names = await collectNames(this.deps.ctx)
     // 群里成员若在别的项目（未登记为 workspace）也要能读到名册
