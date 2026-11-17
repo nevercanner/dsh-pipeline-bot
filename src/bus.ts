@@ -21,10 +21,14 @@ import { inboxFor } from './bridge.ts'
 import { deliver, isLive } from './deliver.ts'
 import { collectNames, listCandidates, resolveMembers } from './discovery.ts'
 import { syncName } from './names.ts'
+import { MIRROR_PREFIX } from './relay.ts'
 import { ensureRoom, postToRoom } from './room.ts'
 import {
   addMember,
   appendMessage,
+  bindSession,
+  isRoomMirrored,
+  markRoomMirrored,
   clearMessages,
   ensureMemberIds,
   findTask,
@@ -175,6 +179,28 @@ export class GroupBus {
     ref: string,
   ): Promise<Member | undefined> {
     const found = this.resolveMember(members, ref)
+    // 成员记录存在但**没绑会话**（例如迁移来的组长）：按名字在候选池里补绑，
+    // 否则 @ 它永远不会醒，而工具还报「已投递/无绑定」看不出问题。
+    if (found !== undefined && found.sessionId === '' && found.role !== 'external') {
+      const wanted = normalizeName(found.name)
+      const match =
+        candidates.find((item) => normalizeName(item.name) === wanted) ??
+        candidates.find((item) => normalizeName(item.id) === wanted) ??
+        candidates.find((item) => normalizeName(item.name).includes(wanted))
+      if (match !== undefined) {
+        await bindSession(this.deps.groupId, found.name, match.sessionId)
+        void syncName(
+          this.deps.logger === undefined ? {} : { logger: this.deps.logger },
+          match.cwd ?? '',
+          match.sessionId,
+          found.name,
+        )
+        const refreshed = await this.members()
+        const rebound = this.resolveMember(refreshed.members, found.name)
+        if (rebound !== undefined) return rebound
+      }
+      return found
+    }
     if (found !== undefined) return found
     const raw = asText(ref).trim()
     if (raw === '') return undefined
@@ -235,16 +261,27 @@ export class GroupBus {
     return room.sessionId
   }
 
+  /**
+   * 把一条群消息写进群聊会话。
+   *
+   * 两条克制：
+   *   ① **按 id 去重**：写过的消息 id 记进 `roomMirrored`，回填/重放不会重复写
+   *   ② **只写有信息量的**：wake（"→ 某人：已唤醒"）这类高频噪音不写 ——
+   *      每写一条都要过一次群会话的请求，而它的上下文会越来越长，成本随之上升
+   */
   private async mirrorToRoom(message: Message): Promise<void> {
     try {
+      if (message.kind === 'wake') return
       const group = await this.group()
       const roomId = group.roomSessionId ?? ''
-      if (roomId === '') return   // 没有群聊会话就只记群记录，不在发言路径上建会话
-      await postToRoom(
+      if (roomId === '') return
+      if (await isRoomMirrored(group.id, message.id)) return
+      const result = await postToRoom(
         { ctx: this.deps.ctx, ...(this.deps.logger === undefined ? {} : { logger: this.deps.logger }) },
         roomId,
-        `【群 ${group.title}】${message.from}：${message.text}`,
+        `${MIRROR_PREFIX}${message.from}：${asText(message.text).split(MIRROR_PREFIX).join('').trim()}`,
       )
+      if (result.ok && result.duplicate !== true) await markRoomMirrored(group.id, message.id)
     } catch {
       /* 镜像失败不影响群本身 */
     }
@@ -526,6 +563,39 @@ export class GroupBus {
     const items = inboxFor(group.messages, memberName, cursor, { ambient: options.ambient === true })
     void record
     return { items, cursor }
+  }
+
+  /**
+   * 把群历史补写进群聊会话（幂等由调用方按时间点控制）。
+   * 用于修复「以前用 inject 镜像，导致会话里看不到群消息」的历史数据。
+   */
+  async backfillRoom(limit = 30): Promise<{ wrote: number; detail: string }> {
+    const group = await this.group()
+    const room = group.roomSessionId ?? ''
+    if (room === '') return { wrote: 0, detail: '没有群聊会话' }
+    // 跳过 wake 噪音；按消息 id 幂等：写过的不会再写第二遍
+    const recent = group.messages.filter((message) => message.kind !== 'wake').slice(-limit)
+    let wrote = 0
+    let skipped = 0
+    for (const message of recent) {
+      if (await isRoomMirrored(group.id, message.id)) {
+        skipped += 1
+        continue
+      }
+      const result = await postToRoom(
+        { ctx: this.deps.ctx, ...(this.deps.logger === undefined ? {} : { logger: this.deps.logger }) },
+        room,
+        `${MIRROR_PREFIX}${message.from}：${asText(message.text).split(MIRROR_PREFIX).join('').trim()}`,
+      )
+      if (result.ok && result.duplicate !== true) {
+        await markRoomMirrored(group.id, message.id)
+        wrote += 1
+      } else if (result.duplicate === true) {
+        await markRoomMirrored(group.id, message.id)
+        skipped += 1
+      }
+    }
+    return { wrote, detail: `补写 ${wrote} 条，已存在跳过 ${skipped} 条（共 ${recent.length} 条）` }
   }
 
   async addMember(member: {

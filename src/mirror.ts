@@ -92,6 +92,11 @@ export function installMemberMirror(deps: MirrorDeps): MirrorHandle {
       })
   }
 
+  if (typeof deps.ctx?.on !== 'function') {
+    // 宿主没有事件总线时不拖垮装配：镜像能力缺席，其余功能照常
+    deps.logger?.warn?.('[dsh-pipeline-bot] 宿主没有 ctx.on，成员发言镜像不可用')
+    return { count: () => 0, dispose: () => {} }
+  }
   const off = deps.ctx.on('session/event', handle)
   return {
     count: () => mirrored,

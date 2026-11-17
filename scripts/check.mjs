@@ -299,7 +299,7 @@ const { syncName } = await import(new URL('../lib/names.js', import.meta.url).hr
 // D. 双向中继（群之所以是群，而不是某个 agent 的分身）
 console.log('D. 双向中继')
 const { assistantTextOf, installMemberMirror } = await import(new URL('../lib/mirror.js', import.meta.url).href)
-const { humanTextOf, installRoomRelay } = await import(new URL('../lib/relay.js', import.meta.url).href)
+const { humanTextOf, installRoomRelay, installRoomModelMute, MIRROR_PREFIX } = await import(new URL('../lib/relay.js', import.meta.url).href)
 
 assistantTextOf({ data: { message: { content: [{ type: 'text', text: '我改完了' }] } } }) === '我改完了'
   ? ok('成员回复正文可抽取')
@@ -342,7 +342,7 @@ await new Promise((r) => setTimeout(r, 50))
 recorded.length === 1 ? ok('同一 event 不重复镜像') : bad('重复镜像', String(recorded.length))
 mirror.dispose()
 
-// relay：群会话的 pre-step 必须被 reject（不跑模型），且分派给人
+// relay：群会话的输入必须被放行（enter，否则消息不落盘、群里看不见）且分派给人
 let dispatchedText = null
 const relay = installRoomRelay({
   ctx: fakeCtx,
@@ -353,9 +353,25 @@ const decision = await listeners['agent/pre-step'](
   { agent: { id: 'room-1' }, messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '@gate 复核' }] }], turn: 1, step: 1 },
   async () => ({ kind: 'enter', messages: [] }),
 )
-decision?.kind === 'reject' && dispatchedText === '@gate 复核'
-  ? ok('群会话输入被分派，且不跑自身模型（reject）')
+decision?.kind === 'enter' && dispatchedText === '@gate 复核'
+  ? ok('群会话输入被分派且放行（消息才能落进会话日志）')
   : bad('群会话中继行为不符', `decision=${decision?.kind} dispatched=${dispatchedText}`)
+
+// 压制群会话模型输出：agent/request 应把 maxTokens 压到 1
+const mute = installRoomModelMute({ ctx: fakeCtx, groupOfRoom: async (id) => (id === 'room-1' ? 'g1' : undefined), dispatch: async () => ({ targets: [] }) })
+const mutedConfig = await listeners['agent/request'](
+  { agent: { id: 'room-1' }, turn: 1, step: 1 },
+  async () => ({ provider: 'p', model: 'm', temperature: 0.7, maxTokens: 4096 }),
+)
+mutedConfig?.maxTokens === 1 && mutedConfig?.temperature === 0
+  ? ok('群会话模型输出被压到 1 token（不产生分身式长回复）')
+  : bad('群会话模型未压制', JSON.stringify(mutedConfig))
+const normalConfig = await listeners['agent/request'](
+  { agent: { id: 's-other' }, turn: 1, step: 1 },
+  async () => ({ provider: 'p', model: 'm', maxTokens: 4096 }),
+)
+normalConfig?.maxTokens === 4096 ? ok('普通会话的模型配置不受影响') : bad('普通会话被误压制')
+mute.dispose()
 // 非群会话不拦截
 const passthrough = await listeners['agent/pre-step'](
   { agent: { id: 's-other' }, messages: [], turn: 1, step: 1 },

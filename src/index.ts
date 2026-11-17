@@ -26,7 +26,7 @@
 import { GroupBus, normalizeName } from './bus.ts'
 import { collectNames } from './discovery.ts'
 import { installMemberMirror } from './mirror.ts'
-import { installRoomRelay } from './relay.ts'
+import { installRoomModelMute, installRoomRelay } from './relay.ts'
 import { registerRoutes } from './routes.ts'
 import { registerBusTools } from './tools.ts'
 import * as store from './store.ts'
@@ -131,7 +131,15 @@ export function apply(ctx: any, config: Config = {}): void {
   }
 
   // ── 工具：每个 agent 都能用（多 agent 协作的实现面）──
-  const mountTools = (): void => {
+  /**
+   * 挂工具。返回 disposer，由 `ctx.inject` 回调自己持有。
+   *
+   * 踩过的坑：早先把 `ctx.effect(() => () => dispose())` 写在 inject 回调**内部**，
+   * 那个 effect 建在回调的瞬时作用域上，回调一返回就被回收 —— 工具刚注册就被拆掉。
+   * 现象是「fiber 一直 active，但工具表里一个 pipeline_* 都没有」。
+   * 正确做法：把 disposer 作为 inject 回调的返回值，生命周期跟着依赖作用域走。
+   */
+  const mountTools = (): (() => void) => {
     let tools: any
     try {
       tools = ctx.tools
@@ -140,7 +148,7 @@ export function apply(ctx: any, config: Config = {}): void {
     }
     if (typeof tools?.register !== 'function') {
       log.warn('宿主没有 tools 服务，pipeline_* 工具不可用（面板仍可用）')
-      return
+      return () => {}
     }
     const disposers = registerBusTools({
       tools: tools as any,
@@ -149,10 +157,14 @@ export function apply(ctx: any, config: Config = {}): void {
       logger: log,
     })
     log.info(`pipeline_* 工具已注册 ${disposers.length} 个`)
-    if (typeof ctx.effect === 'function') {
-      ctx.effect(() => () => {
-        for (const dispose of disposers) dispose()
-      }, 'pipeline-bot: tools')
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          /* 忽略 */
+        }
+      }
     }
   }
 
@@ -222,10 +234,18 @@ export function apply(ctx: any, config: Config = {}): void {
       logger: log,
     })
 
+    const mute = installRoomModelMute({
+      ctx,
+      groupOfRoom,
+      dispatch: async () => ({ targets: [] }),
+      logger: log,
+    })
+
     if (typeof ctx.effect === 'function') {
       ctx.effect(() => () => {
         mirror.dispose()
         relay.dispose()
+        mute.dispose()
       }, 'pipeline-bot: relay')
     }
     log.info('双向中继已安装（成员回复进群；群聊会话输入分派给成员）')
@@ -246,9 +266,11 @@ export function apply(ctx: any, config: Config = {}): void {
   }
 
   if (typeof ctx.inject === 'function') {
+    // inject 回调的返回值会被当作 disposer，跟着依赖作用域回收
     ctx.inject(['tools'], mountTools)
   } else {
-    mountTools()
+    const dispose = mountTools()
+    if (typeof ctx.effect === 'function') ctx.effect(dispose, 'pipeline-bot: tools')
   }
 
   installRelay()

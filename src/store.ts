@@ -301,6 +301,86 @@ export async function addMember(
 }
 
 /**
+ * 账本写入串行队列。
+ *
+ * 为什么需要：markRoomMirrored 是「读-改-写」，连续两次调用会各自 load 到同一份
+ * 旧数据，后写的把先写的覆盖掉（实测：回填 12 条，账本最后只剩 1 条）。
+ * 串起来执行才真正累加。
+ */
+let ledgerQueue: Promise<void> = Promise.resolve()
+
+/**
+ * 进程内权威账本。
+ *
+ * 为什么不能只依赖文件：groups.json 是整份覆盖写，并发的其它写操作（发言、任务、
+ * 成员变更）会用各自的旧快照把我的账本冲掉 —— 实测回填 12 条，文件里只剩 2 条，
+ * 于是下一次回填又写一遍，形成重复。
+ * 去重必须以**进程内集合**为准，文件只做持久化备份（重启后从文件重建）。
+ */
+const ledger = new Set<string>()
+let ledgerSeeded = false
+
+async function seedLedger(): Promise<void> {
+  if (ledgerSeeded) return
+  ledgerSeeded = true
+  try {
+    const store = await load()
+    for (const group of Object.values(store.groups)) {
+      for (const id of group.roomMirrored ?? []) ledger.add(`${group.id}|${id}`)
+    }
+  } catch {
+    /* 重建失败不影响进程内去重 */
+  }
+}
+
+/** 记一条「已写进群聊会话」的消息 id（有界，保留最近 800 条）。 */
+export async function markRoomMirrored(groupId: string, messageId: string): Promise<void> {
+  await seedLedger()
+  ledger.add(`${groupId}|${messageId}`)
+  const run = async (): Promise<void> => {
+    const store = await load()
+    const group = store.groups[groupId]
+    if (group === undefined) return
+    const merged = new Set(group.roomMirrored ?? [])
+    for (const entry of ledger) {
+      const index = entry.indexOf('|')
+      if (index < 0) continue
+      if (entry.slice(0, index) !== groupId) continue
+      merged.add(entry.slice(index + 1))
+    }
+    group.roomMirrored = [...merged].slice(-800)
+    await flush(store)
+  }
+  ledgerQueue = ledgerQueue.then(run, run)
+  await ledgerQueue
+}
+
+export async function isRoomMirrored(groupId: string, messageId: string): Promise<boolean> {
+  await seedLedger()
+  if (ledger.has(`${groupId}|${messageId}`)) return true
+  const store = await load()
+  const group = store.groups[groupId]
+  return (group?.roomMirrored ?? []).includes(messageId)
+}
+
+/** 给已有成员补绑会话（迁移来的组长常常没有 sessionId）。 */
+export async function bindSession(groupId: string, name: string, sessionId: string): Promise<Group | undefined> {
+  const store = await load()
+  const group = store.groups[groupId]
+  if (group === undefined) return undefined
+  const wanted = asText(name).trim().toLowerCase()
+  const id = asText(sessionId).trim()
+  if (id === '') return group
+  const member = group.members.find((item) => asText(item.name).trim().toLowerCase() === wanted)
+  if (member === undefined) return group
+  if (member.sessionId === id) return group
+  member.sessionId = id
+  group.updatedAt = Date.now()
+  await flush(store)
+  return group
+}
+
+/**
  * 回填成员 id：老数据只有 name，没有 id。
  * 一次性写进记录，保证「id 加入时定下、之后改名也不变」——
  * 否则 @ 一个改过名的成员会因为 id 重新推导而失配。

@@ -114,6 +114,13 @@ export interface Group {
   projectRoot?: string
   /** 外部产品桥接 key。 */
   bridgeKey: string
+  /**
+   * 已写进群聊会话的消息 id（去重账本）。
+   *
+   * 为什么按 id 而不是按内容：内容去重需要 TTL，回填重跑就会重复写；
+   * 按 id 记账是幂等的 —— 同一条群消息不管回填几次，只会写一遍。
+   */
+  roomMirrored?: string[]
   createdAt: number
   updatedAt: number
 }

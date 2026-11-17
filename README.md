@@ -45,8 +45,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.2.2.tgz`](./dist/dsh-pipeline-bot-0.2.2.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.2.2.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.3.0.tgz`](./dist/dsh-pipeline-bot-0.3.0.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.3.0.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 
@@ -123,6 +123,23 @@ node <插件目录>/bin/client.mjs \
 | `POST /bridge/ack` | `{group,member,ids}` 确认消费 |
 
 认证：`x-pipeline-key` 头 = 群的 `bridgeKey`。没有它，任何本地进程都能冒充成员发言。
+
+## 群聊会话里的消息：可见性、幂等与成本
+
+群消息会被写进群聊会话，**作为会话里看得见的 `user/message`**（带 `【群】发言人：正文` 前缀，
+因为宿主的 prompt 接口不携带自定义来源，前缀是唯一的来源标记）。
+
+三条工程约束（都是踩坑后加的，有实测数据支撑）：
+
+| 约束 | 为什么 |
+|---|---|
+| `pre-step` 必须 `enter`，不能 `reject` | reject 会让 turn 直接结束，`user/message` **一条都不写** —— 群里看着有、会话里是空的 |
+| 群会话的模型调用压到 `maxTokens:1` | 消息要落盘就得进 step，进 step 就会调模型；压到 1 token 避免"冒充发言人"的长回复 |
+| 镜像按**消息 id** 去重，索引放进程内 Set、文件只做备份 | 按内容去重需要 TTL，回填重跑就重复写（实测同一条写过 6 次）；`groups.json` 是整份覆盖写，并发写会冲掉文件里的账本 |
+
+代价要说清楚：**每写一条群消息 = 一次极小的模型请求**（输入是群会话上下文）。
+所以默认只镜像有信息量的消息（人的发言、成员回复、任务事件），
+`wake`（"→ 某人：已唤醒"）这类高频噪音不写。
 
 ## 为什么群里看得到每个人说话（而不是组长的分身）
 

@@ -13,8 +13,9 @@
  *
  * 会话的 cwd 由它所属项目决定 —— 群不需要一个自己的目录。
  */
+import { MIRROR_PREFIX } from './relay.ts'
 import type { Group } from './types.ts'
-import { resolveService } from './util.ts'
+import { asText, resolveService } from './util.ts'
 
 export interface RoomDeps {
   ctx: any
@@ -113,7 +114,7 @@ async function seedRoom(deps: RoomDeps, controller: any, sessionId: string, grou
     .slice(0, 24)
     .join('、')
   const text = [
-    `群聊「${group.title}」已建立。`,
+    `${MIRROR_PREFIX}群聊「${group.title}」已建立。`,
     roster === '' ? '成员：待加入。' : `成员：${roster}。`,
     '这个会话是群聊的落点：群里的每条消息都会同步到这里，你可以在这里直接说话。',
     '不需要回复这条消息。',
@@ -267,13 +268,177 @@ export async function ensureRoom(deps: RoomDeps, group: Group, preferred?: strin
   }
 }
 
-/** 把一条群消息推进群聊会话（人打开那个会话就能看到完整对话）。 */
+/**
+ * 短时间去重：同一 (会话, 正文) 只写一次。
+ *
+ * 为什么需要：镜像（发言时）与补写（backfillRoom）可能指向同一条群消息；
+ * 而 prompt 是"追加"语义，没有幂等键，重复调用就会写两份。
+ */
+const recentWrites = new Map<string, number>()
+const WRITE_TTL_MS = 60_000
+
+function isDuplicateWrite(sessionId: string, body: string): boolean {
+  const key = `${sessionId}|${body.slice(0, 160)}`
+  const now = Date.now()
+  for (const [existing, at] of recentWrites) {
+    if (now - at > WRITE_TTL_MS) recentWrites.delete(existing)
+  }
+  if (recentWrites.has(key)) return true
+  recentWrites.set(key, now)
+  return false
+}
+
+/** 群会话的 agent 必须活着：冷会话里 prompt 只排队、永不执行。 */
+async function ensureAgentLive(deps: RoomDeps, sessionId: string): Promise<boolean> {
+  const agents = service(deps.ctx, 'agents')
+  try {
+    if (agents?.get?.(sessionId) !== undefined) return true
+  } catch {
+    /* 继续尝试冷启动 */
+  }
+  const controller = service(deps.ctx, 'sessionController')
+  if (typeof controller?.resolveAgent === 'function') {
+    try {
+      await controller.resolveAgent(sessionId)
+    } catch {
+      return false
+    }
+  }
+  try {
+    return agents?.get?.(sessionId) !== undefined
+  } catch {
+    return false
+  }
+}
+
+async function wakeRoomAgent(deps: RoomDeps, sessionId: string): Promise<void> {
+  try {
+    const agent = service(deps.ctx, 'agents')?.get?.(sessionId)
+    if (agent !== undefined && typeof agent.wakeDriver === 'function') agent.wakeDriver()
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/** 最近一条 user/message 的 seq（用于判断写入是否真的发生）。 */
+async function lastUserMessageSeq(deps: RoomDeps, sessionId: string): Promise<number> {
+  const query = service(deps.ctx, 'sessionQuery')
+  if (typeof query?.listEvents !== 'function') return -1
+  try {
+    const events = (await query.listEvents(sessionId)) as any[]
+    const users = events.filter((event) => event?.type === 'user/message')
+    return users.length === 0 ? -1 : Number(users[users.length - 1].seq)
+  } catch {
+    return -1
+  }
+}
+
+/**
+ * 等待「我们这条」真的出现在会话事件里。
+ *
+ * 判定：出现 seq 大于起点、且正文包含本条前 24 字（去空白）的 user/message。
+ * 用正文比对而不是只数数量 —— 数量增加也可能来自别人的消息。
+ */
+async function waitPersisted(
+  deps: RoomDeps,
+  sessionId: string,
+  body: string,
+  beforeSeq: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const query = service(deps.ctx, 'sessionQuery')
+  if (typeof query?.listEvents !== 'function' || typeof query?.readEvent !== 'function') return true
+  const needle = body.replace(/\s+/g, ' ').slice(0, 24)
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const events = (await query.listEvents(sessionId)) as any[]
+      const fresh = events.filter((event) => event?.type === 'user/message' && Number(event.seq) > beforeSeq)
+      for (const event of fresh.slice(-3)) {
+        const window = await query.readEvent({ sessionId, seq: event.seq, before: 0, after: 0 })
+        const blocks = window?.target?.data?.content ?? []
+        const text = blocks
+          .filter((block: any) => block?.type === 'text')
+          .map((block: any) => String(block.text ?? ''))
+          .join(' ')
+          .replace(/\s+/g, ' ')
+        if (text.includes(needle)) return true
+      }
+    } catch {
+      /* 读失败就继续等 */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return false
+}
+
+/**
+ * 把一条群消息写进群聊会话，**作为会话里看得见的一条消息**。
+ *
+ * ── 这里换过实现，原因值得记住 ──────────────────────────────
+ * 早先用 `agent.inject()` 镜像：它只把消息塞进 inbox，必须有**一轮 turn 去消费**
+ * 才会落成 user/message 事件；而我又用 `pre-step` 把群聊会话的每一步 reject 掉
+ * （为了不让它冒充发言人）。两边一夹，结果就是：群里有 32 条消息，
+ * 群聊会话里一条都看不到 —— 用户看到的是"这根本不在群里"。
+ *
+ * 现在用 `sessionController.prompt(mode:'queue')`：它本身就会把正文写进会话日志
+ * （prompt 受理后即落 user/message），然后 relay 依然 reject 这一步 ——
+ * **消息看得见，但不会调用模型**。群聊会话就是一份可读的群记录。
+ */
 export async function postToRoom(
   deps: RoomDeps,
   sessionId: string,
   text: string,
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<{ ok: boolean; detail: string; duplicate?: boolean }> {
   if (sessionId === '') return { ok: false, detail: '没有群聊会话' }
+  let body = asText(text).trim()
+  if (body === '') return { ok: false, detail: '空消息' }
+  // 调用方可能已经把前缀写在正文里（甚至在中间，如「【群】我：【群】xxx」），
+  // 统一剥掉所有出现再补一个 —— 否则会叠成双前缀
+  body = body.split(MIRROR_PREFIX).join('').trim()
+  body = `${MIRROR_PREFIX}${body}`
+  if (body === MIRROR_PREFIX) return { ok: false, detail: '空消息' }
+  // 同一会话 + 同一正文，短时间内写第二次视为重复（镜像与补写都可能触碰同一条）
+  if (isDuplicateWrite(sessionId, body)) {
+    return { ok: true, duplicate: true, detail: '内容已存在，跳过重复写入' }
+  }
+  const controller = service(deps.ctx, 'sessionController')
+
+  // 写之前确保群会话的 agent 活着。
+  // 冷会话下 prompt 只会排进 inbox，永远不会跑 → 事件不落 → 表现为「有时完全不写」。
+  await ensureAgentLive(deps, sessionId)
+
+  if (typeof controller?.prompt === 'function') {
+    const before = await lastUserMessageSeq(deps, sessionId)
+    try {
+      await controller.prompt(
+        {
+          requestId: `pipeline-room-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text: body }],
+        },
+        new AbortController().signal,
+      )
+      // 回读确认：prompt 的 accepted 只代表「受理」，不代表「落盘」。
+      // 早先拿 accepted 当成功，调用方看到的是假成功（群里有、会话里没有）。
+      if (await waitPersisted(deps, sessionId, body, before, 2500)) {
+        return { ok: true, detail: '已写入群聊会话（可见，不调模型）' }
+      }
+      // 不再二次 prompt：早先"回读失败就重试"会把同一条消息写两遍
+      // （实测同一句在会话里出现两份 seq 814 / 821）。这里只踢一下驱动、再多等一会儿，
+      // 仍然确认不了就如实报失败 —— 宁可报失败，也不写重复。
+      await wakeRoomAgent(deps, sessionId)
+      if (await waitPersisted(deps, sessionId, body, before, 4000)) {
+        return { ok: true, detail: '已写入群聊会话（延迟确认落盘）' }
+      }
+      deps.logger?.warn?.('[dsh-pipeline-bot] 群消息回读未命中，标记为写入失败')
+      return { ok: false, detail: '写入未确认：消息未出现在群聊会话事件里' }
+    } catch (error) {
+      deps.logger?.warn?.(`[dsh-pipeline-bot] 写入群聊会话失败，回退 inject：${String(error)}`)
+    }
+  }
+  // 降级：prompt 不可用时退回 inject（消息至少在 inbox，等下一次活动可见）
   const agents = service(deps.ctx, 'agents')
   let agent: any
   try {
@@ -281,9 +446,7 @@ export async function postToRoom(
   } catch {
     agent = undefined
   }
-  if (agent === undefined) {
-    return { ok: false, detail: '群聊会话未激活（消息已在群记录里，打开它即可看到）' }
-  }
+  if (agent === undefined) return { ok: false, detail: '群聊会话未激活且宿主不支持 prompt' }
   try {
     const mod = await import('@deepseek-ai/dsh-llm').catch(() => undefined as any)
     const build = (mod as any)?.createUserMessage
@@ -291,12 +454,12 @@ export async function postToRoom(
       typeof build === 'function'
         ? build({
             source: { kind: 'user', origin: 'dsh-pipeline-bot', from: 'pipeline-bot' },
-            content: [{ type: 'text', text }],
+            content: [{ type: 'text', text: body }],
           })
-        : { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }], id: `room-${Date.now()}` }
+        : { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: body }], id: `room-${Date.now()}` }
     if (typeof agent.inject === 'function') agent.inject(message)
     else agent.send?.(message, 'next-step', false)
-    return { ok: true, detail: '已进群聊会话' }
+    return { ok: true, detail: '已投进群聊会话收件箱（降级）' }
   } catch (error) {
     return { ok: false, detail: `写入群聊会话失败：${String(error)}` }
   }
