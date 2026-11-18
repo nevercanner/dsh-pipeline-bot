@@ -102,9 +102,17 @@ async function readJsonBody(req: any, maxBytes = 512 * 1024): Promise<Record<str
   return parsed as Record<string, unknown>
 }
 
-function groupOf(url: URL, body: Record<string, unknown>): string | undefined {
+/**
+ * 解析「这次请求属于哪个群」。
+ *
+ * `body` 必须允许 undefined —— GET 路径没有请求体，早先这里直接读 `body['group']`
+ * 就抛 `Cannot read properties of undefined (reading 'group')`，
+ * 表现成面板/状态接口 500、连新建群与加成员都一起不可用。
+ */
+function groupOf(url: URL, body?: Record<string, unknown>): string | undefined {
   const fromQuery = asText(url.searchParams.get('group')).trim()
   if (fromQuery !== '') return fromQuery
+  if (body === undefined || body === null) return undefined
   const fromBody = asText(body['group']).trim()
   return fromBody === '' ? undefined : fromBody
 }
