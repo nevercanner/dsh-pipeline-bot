@@ -28,6 +28,7 @@ import {
   addMember,
   appendMessage,
   bindSession,
+  boundSessionOf,
   clearRoomMirrorLedger,
   isRoomMirrored,
   markRoomMirrored,
@@ -98,6 +99,36 @@ export interface SpeakResult {
   note: string
 }
 
+/**
+ * 最近被群唤醒过的会话：sessionId → 时间戳。
+ *
+ * 用途：镜像门槛。除了「有未收口任务」，**刚被群里 @ 过**也算「在回群里的活」——
+ * 否则「@ 某人一句话，他回一句」这种最基本用法，回复不会出现在群里。
+ * 窗口取 10 分钟：够一轮对话，又不至于把之后的闲聊也广播出去。
+ */
+const recentlyWoken = new Map<string, number>()
+const WAKE_WINDOW_MS = 10 * 60 * 1000
+
+export function markWoken(sessionId: string): void {
+  if (sessionId === '') return
+  recentlyWoken.set(sessionId, Date.now())
+  if (recentlyWoken.size > 200) {
+    for (const [id, at] of recentlyWoken) {
+      if (Date.now() - at > WAKE_WINDOW_MS) recentlyWoken.delete(id)
+    }
+  }
+}
+
+export function wasRecentlyWoken(sessionId: string): boolean {
+  const at = recentlyWoken.get(sessionId)
+  if (at === undefined) return false
+  if (Date.now() - at > WAKE_WINDOW_MS) {
+    recentlyWoken.delete(sessionId)
+    return false
+  }
+  return true
+}
+
 export class GroupBus {
   private deps: BusDeps
 
@@ -141,7 +172,13 @@ export class GroupBus {
         status: 'inactive' as const,
         product: record.product ?? 'external',
       }))
-    const members = resolveMembers(group.members, pool.candidates, externals)
+    // 进程内绑定优先：文件可能被并发写冲掉，但绑定本身不该丢
+    const withBindings = group.members.map((record) => {
+      if (record.sessionId !== undefined && record.sessionId !== '') return record
+      const bound = boundSessionOf(group.id, record.name)
+      return bound === undefined ? record : { ...record, sessionId: bound }
+    })
+    const members = resolveMembers(withBindings, pool.candidates, externals)
     // 在线状态以「此刻活着没有」为准
     for (const member of members) {
       if (member.role === 'external' || member.sessionId === '') continue
@@ -365,6 +402,7 @@ export class GroupBus {
         options.mode ?? 'steer',
         { id: options.role === 'human' ? 'human' : 'pipeline-bot', name: options.from },
       )
+      if (result.ok) markWoken(member.sessionId)
       deliveries.push({ name: member.name, sessionId: member.sessionId, detail: result.detail, ok: result.ok, outcome: result.outcome })
     }
 

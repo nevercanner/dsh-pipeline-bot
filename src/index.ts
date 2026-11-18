@@ -23,7 +23,7 @@
  *   ① profile patch 的 enabled —— 插件自身允许工作
  *   ② 群成员是**显式加入**的 —— 加入本身就是意图声明，不再需要项目级开关
  */
-import { GroupBus, normalizeName } from './bus.ts'
+import { GroupBus, normalizeName, wasRecentlyWoken } from './bus.ts'
 import { collectNames } from './discovery.ts'
 import { installMemberMirror } from './mirror.ts'
 import { installRoomModelMute, installRoomRelay } from './relay.ts'
@@ -300,7 +300,9 @@ export function apply(ctx: any, config: Config = {}): void {
         const hasOpenTask = group.tasks.some(
           (task) => task.status === 'dispatched' && task.targets.includes(member.name),
         )
-        if (!hasOpenTask) return
+        // 有未收口任务 = 在回活；刚被群里 @ 过 = 在回话。两者都算「对群发言」。
+        const wokenByGroup = wasRecentlyWoken(sessionId)
+        if (!hasOpenTask && !wokenByGroup) return
         const name = member.name
         const role = member?.role === 'lead' ? 'lead' : member?.role === 'external' ? 'external' : 'member'
         await store.appendMessage(groupId, {

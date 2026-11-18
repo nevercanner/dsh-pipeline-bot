@@ -45,8 +45,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.4.0.tgz`](./dist/dsh-pipeline-bot-0.4.0.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.4.0.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.4.1.tgz`](./dist/dsh-pipeline-bot-0.4.1.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.4.1.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 
@@ -149,6 +149,7 @@ node <插件目录>/bin/client.mjs \
 |---|---|
 | 成员显式 `pipeline_say` / `pipeline_report` | 会 |
 | 成员名下有**未收口任务**时的回复 | 会（这是"回活"） |
+| 成员刚被群里 @ 过（10 分钟内）的回复 | 会（这是"回话"） |
 | 成员纯闲聊、开发过程、系统提示（如"输出到上限"） | 不会 |
 | 已移出群的会话 | 不会（也不进回填） |
 | `wake`（"→ 某人：已唤醒"） | 不会 |

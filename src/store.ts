@@ -380,6 +380,15 @@ export async function isRoomMirrored(groupId: string, messageId: string): Promis
   return (group?.roomMirrored ?? []).includes(messageId)
 }
 
+/**
+ * 成员名 → sessionId 的进程内权威绑定表。
+ *
+ * 为什么不能只写文件：groups.json 是整份覆盖写，并发的其它写（发言/任务/账本）
+ * 可能用旧快照把刚写进去的绑定冲掉 —— 实测组长绑定后读回来是 null，
+ * 于是每条消息都要重新按名字认领一次。
+ */
+const bindings = new Map<string, string>()
+
 /** 给已有成员补绑会话（迁移来的组长常常没有 sessionId）。 */
 export async function bindSession(groupId: string, name: string, sessionId: string): Promise<Group | undefined> {
   const store = await load()
@@ -390,11 +399,35 @@ export async function bindSession(groupId: string, name: string, sessionId: stri
   if (id === '') return group
   const member = group.members.find((item) => asText(item.name).trim().toLowerCase() === wanted)
   if (member === undefined) return group
+  bindings.set(`${groupId}|${wanted}`, id)
   if (member.sessionId === id) return group
   member.sessionId = id
   group.updatedAt = Date.now()
   await flush(store)
+
+  // 回读校验：groups.json 是整份覆盖写，并发写可能把刚写的绑定冲掉。
+  // 写完确认一次，不成就重试（每次重读文件再写），最多 3 次。
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const check = await load()
+    const fresh = check.groups[groupId]?.members.find(
+      (item) => asText(item.name).trim().toLowerCase() === wanted,
+    )
+    if (fresh?.sessionId === id) return check.groups[groupId]
+    const again = check.groups[groupId]
+    if (again === undefined) return group
+    const target = again.members.find((item) => asText(item.name).trim().toLowerCase() === wanted)
+    if (target === undefined) return group
+    target.sessionId = id
+    again.updatedAt = Date.now()
+    await flush(check)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  }
   return group
+}
+
+/** 读进程内绑定（members() 解析时用，优先于文件）。 */
+export function boundSessionOf(groupId: string, name: string): string | undefined {
+  return bindings.get(`${groupId}|${asText(name).trim().toLowerCase()}`)
 }
 
 /**
