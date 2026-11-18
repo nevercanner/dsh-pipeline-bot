@@ -458,6 +458,24 @@ window.__ModuleLoader__.load({
                 h('input', { style: { ...S.select, width: 84 }, placeholder: '头像 emoji', value: newMember.glyph, onChange: (e) => setNewMember({ ...newMember, glyph: e.target.value }) }),
                 h('button', { style: S.btn, onClick: () => void addManual() }, '加入群'),
               ),
+              h('div', { style: { fontWeight: 600, marginTop: 6 } }, '群聊会话'),
+              h(
+                'div',
+                { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                h('span', { style: { fontSize: 11, opacity: 0.7 } }, `当前会话：${snap?.roomSessionId || '（未创建）'}`),
+                h(
+                  'button',
+                  {
+                    style: S.btn,
+                    title: '新建一个干净的群聊会话，把最近的有效消息补写进去，旧会话归档',
+                    onClick: () =>
+                      act(async () => {
+                        await postJson('/room/rebuild', { group: groupRef, limit: 20 })
+                      }),
+                  },
+                  '重建群会话',
+                ),
+              ),
               h('div', { style: { fontWeight: 600, marginTop: 6 } }, '移除成员'),
               h(
                 'div',

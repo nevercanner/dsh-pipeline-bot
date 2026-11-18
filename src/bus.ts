@@ -21,12 +21,14 @@ import { inboxFor } from './bridge.ts'
 import { deliver, isLive } from './deliver.ts'
 import { collectNames, listCandidates, resolveMembers } from './discovery.ts'
 import { syncName } from './names.ts'
+import { resolveService } from './util.ts'
 import { MIRROR_PREFIX } from './relay.ts'
 import { ensureRoom, postToRoom } from './room.ts'
 import {
   addMember,
   appendMessage,
   bindSession,
+  clearRoomMirrorLedger,
   isRoomMirrored,
   markRoomMirrored,
   clearMessages,
@@ -566,6 +568,45 @@ export class GroupBus {
   }
 
   /**
+   * 重建群聊会话：新会话干净、旧会话归档。
+   *
+   * 用途：历史里已经存在的重复记录（同一条写过 6 次那批）是**不可变日志**，
+   * 删不掉。与其让用户对着一条脏记录看，不如换一个干净的会话，
+   * 只把「有信息量的最近 N 条」重新写进去，然后把旧的归档。
+   */
+  async rebuildRoom(limit = 24): Promise<{ sessionId: string; wrote: number; archived: string; detail: string }> {
+    const group = await this.group()
+    const old = group.roomSessionId ?? ''
+    // 新会话要重新写一遍，所以先清该群的镜像账本
+    await clearRoomMirrorLedger(group.id)
+    const room = await ensureRoom(
+      { ctx: this.deps.ctx, ...(this.deps.logger === undefined ? {} : { logger: this.deps.logger }) },
+      { ...group, roomSessionId: undefined },
+      group.projectRoot,
+      true,
+    )
+    if (room.sessionId === '') return { sessionId: '', wrote: 0, archived: '', detail: room.detail }
+    await setRoom(group.id, room.sessionId)
+    const filled = await this.backfillRoom(limit)
+    let archived = ''
+    if (old !== '' && old !== room.sessionId) {
+      const registry = resolveService<any>(this.deps.ctx, 'workspaceRegistry')
+      try {
+        await registry?.archiveSession?.(old, { stopActivity: true })
+        archived = old
+      } catch {
+        /* 归档失败不影响新会话 */
+      }
+    }
+    return {
+      sessionId: room.sessionId,
+      wrote: filled.wrote,
+      archived,
+      detail: `${room.detail}；${filled.detail}${archived === '' ? '' : '；旧会话已归档'}`,
+    }
+  }
+
+  /**
    * 把群历史补写进群聊会话（幂等由调用方按时间点控制）。
    * 用于修复「以前用 inject 镜像，导致会话里看不到群消息」的历史数据。
    */
@@ -573,8 +614,17 @@ export class GroupBus {
     const group = await this.group()
     const room = group.roomSessionId ?? ''
     if (room === '') return { wrote: 0, detail: '没有群聊会话' }
-    // 跳过 wake 噪音；按消息 id 幂等：写过的不会再写第二遍
-    const recent = group.messages.filter((message) => message.kind !== 'wake').slice(-limit)
+    // 只补写「当前仍是群成员」的发言与人的发言：
+    // 早先会把已移出成员的旧闲聊（例如做开发的那个会话）也补进新会话，
+    // 结果新会话里全是无关内容。
+    const memberNames = new Set(group.members.map((member) => normalizeName(member.name)))
+    const recent = group.messages
+      .filter((message) => message.kind !== 'wake')
+      .filter((message) => {
+        if (message.role === 'human' || message.role === 'system') return true
+        return memberNames.has(normalizeName(message.from))
+      })
+      .slice(-limit)
     let wrote = 0
     let skipped = 0
     for (const message of recent) {

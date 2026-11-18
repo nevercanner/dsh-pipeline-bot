@@ -200,7 +200,12 @@ export async function resolveRoomProject(
  *
  * @param preferred 调用方所在项目（可选）；缺省用群记录的 projectRoot
  */
-export async function ensureRoom(deps: RoomDeps, group: Group, preferred?: string): Promise<RoomResult> {
+export async function ensureRoom(
+  deps: RoomDeps,
+  group: Group,
+  preferred?: string,
+  force = false,
+): Promise<RoomResult> {
   const { ctx } = deps
   const controller = service(ctx, 'sessionController')
   const target = await resolveRoomProject(deps, group, preferred)
@@ -210,7 +215,7 @@ export async function ensureRoom(deps: RoomDeps, group: Group, preferred?: strin
   const { workspaceId, projectRoot } = target
 
   // ① 已有且还活着：补 pin；若是空会话则补一条开场消息（否则侧边栏看不见它）
-  const existing = group.roomSessionId ?? ''
+  const existing = force ? '' : (group.roomSessionId ?? '')
   if (existing !== '' && (await alive(ctx, existing))) {
     if (await isBlank(ctx, existing)) {
       await seedRoom(deps, controller, existing, group)

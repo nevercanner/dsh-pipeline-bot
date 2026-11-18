@@ -170,33 +170,30 @@ export function apply(ctx: any, config: Config = {}): void {
     let disposed = false
     const timers: Array<() => void> = []
 
-    const clearTimers = (): void => {
-      for (const cancel of timers.splice(0)) {
+    const presentCount = (): number => {
+      let present = 0
+      for (const name of TOOL_NAMES) {
         try {
-          cancel()
+          if (tools.get(name) !== undefined) present += 1
+        } catch {
+          /* 读不到算缺失 */
+        }
+      }
+      return present
+    }
+
+    const releaseLocal = (): void => {
+      for (const dispose of disposers.splice(0)) {
+        try {
+          dispose()
         } catch {
           /* 忽略 */
         }
       }
     }
 
-    const mountOnce = (): boolean => {
+    const registerFresh = (): boolean => {
       if (disposed) return true
-      // 关键：只有**我自己**注册成功才算成功。
-      // 名字被占着（旧 fiber 还没卸）看起来「齐了」，但那是别人的注册，
-      // 旧 fiber 一卸就全没了 —— 早先这里返回 true 直接停掉重试，于是永远补不上。
-      if (disposers.length > 0) return true
-      const missing = TOOL_NAMES.filter((name) => {
-        try {
-          return tools.get(name) === undefined
-        } catch {
-          return true
-        }
-      })
-      if (missing.length === 0) {
-        // 被别人占着：不算成功，等下一轮重试
-        return false
-      }
       const fresh = registerBusTools({
         tools: tools as any,
         busForCaller: async (exec: any, group?: string) => busFor(group ?? (await busForForCaller(exec))),
@@ -204,46 +201,52 @@ export function apply(ctx: any, config: Config = {}): void {
         logger: log,
       })
       disposers.push(...fresh)
-      const stillMissing = TOOL_NAMES.filter((name) => {
-        try {
-          return tools.get(name) === undefined
-        } catch {
-          return true
-        }
-      })
-      if (stillMissing.length > 0) {
-        log.warn(`pipeline_* 注册未齐（缺 ${stillMissing.join(',')}），稍后重试`)
-        return false
-      }
-      log.info(`pipeline_* 工具已注册 ${fresh.length} 个`)
-      return true
+      const ok = presentCount() === TOOL_NAMES.length
+      if (ok) log.info(`pipeline_* 工具已注册 ${fresh.length} 个`)
+      return ok
     }
 
-    // 立即尝试；不齐就退避重试（旧 fiber 的拆解通常在几十毫秒内完成）
-    if (!mountOnce()) {
+    /**
+     * 自愈：一发现四个名字缺失就重挂。
+     *
+     * 为什么必须是**常驻**检查而不是挂载时重试几次：
+     * 热重载里旧 fiber 的卸载时机不确定（可能在几秒后），早先只退避 4 次
+     * （共约 5 秒）就放弃，于是「某次 reload 后工具整体消失、再也不回来」。
+     * 这里每 5 秒看一次，缺一次补一次 —— 与 reload 时序彻底解耦。
+     */
+    const heal = (): void => {
+      if (disposed) return
+      try {
+        if (presentCount() === TOOL_NAMES.length) return
+        releaseLocal()
+        registerFresh()
+      } catch (error) {
+        log.warn(`pipeline_* 自愈失败：${String(error)}`)
+      }
+    }
+
+    // 立即挂一次；后面由看门狗兜住任意时刻的失效
+    if (!registerFresh()) {
       for (const delay of [200, 600, 1500, 3000]) {
-        const timer = setTimeout(() => {
-          if (disposed) return
-          if (mountOnce()) clearTimers()
-        }, delay)
-        if (typeof timer === 'object' && timer !== null && typeof (timer as any).unref === 'function') {
-          (timer as any).unref()
-        }
+        const timer = setTimeout(heal, delay)
+        if (typeof (timer as any)?.unref === 'function') (timer as any).unref()
         timers.push(() => clearTimeout(timer))
       }
     }
+    const watchdog = setInterval(heal, 5000)
+    if (typeof (watchdog as any)?.unref === 'function') (watchdog as any).unref()
+    timers.push(() => clearInterval(watchdog))
 
     return () => {
       disposed = true
-      clearTimers()
-      for (const dispose of disposers) {
+      for (const cancel of timers.splice(0)) {
         try {
-          dispose()
+          cancel()
         } catch {
           /* 忽略 */
         }
       }
-      disposers = []
+      releaseLocal()
     }
   }
 
@@ -284,7 +287,21 @@ export function apply(ctx: any, config: Config = {}): void {
       async record(sessionId, groupId, text, seq) {
         const group = await store.getGroup(groupId)
         const member = group.members.find((item) => item.sessionId === sessionId)
-        const name = member?.name ?? `会话${sessionId.replace(/^session-/, '').slice(0, 6)}`
+        if (member === undefined) return
+        /**
+         * 只镜像「正在回群里的活」的回复。
+         *
+         * 早先无条件镜像每个成员的每条 assistant 回复 —— 结果任何在群里的会话
+         * （包括做开发/聊天的那种）写什么都会被广播进群，群里变成某个会话的
+         * 独白，连"输出到上限"这种系统提示都被贴进去。
+         * 现在要求：该成员名下有一条**未收口的任务**，才把回复当作群里的话。
+         * 纯闲聊、开发过程、截断提示一律不进群。
+         */
+        const hasOpenTask = group.tasks.some(
+          (task) => task.status === 'dispatched' && task.targets.includes(member.name),
+        )
+        if (!hasOpenTask) return
+        const name = member.name
         const role = member?.role === 'lead' ? 'lead' : member?.role === 'external' ? 'external' : 'member'
         await store.appendMessage(groupId, {
           from: name,

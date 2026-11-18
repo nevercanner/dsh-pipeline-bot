@@ -45,8 +45,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.3.1.tgz`](./dist/dsh-pipeline-bot-0.3.1.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.3.1.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.4.0.tgz`](./dist/dsh-pipeline-bot-0.4.0.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.4.0.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 
@@ -140,6 +140,25 @@ node <插件目录>/bin/client.mjs \
 代价要说清楚：**每写一条群消息 = 一次极小的模型请求**（输入是群会话上下文）。
 所以默认只镜像有信息量的消息（人的发言、成员回复、任务事件），
 `wake`（"→ 某人：已唤醒"）这类高频噪音不写。
+
+## 谁的话会出现在群里（避免某个会话刷屏）
+
+群是公共频道，但**不是**「成员会话的每一条输出都广播」。规则：
+
+| 情况 | 会进群吗 |
+|---|---|
+| 成员显式 `pipeline_say` / `pipeline_report` | 会 |
+| 成员名下有**未收口任务**时的回复 | 会（这是"回活"） |
+| 成员纯闲聊、开发过程、系统提示（如"输出到上限"） | 不会 |
+| 已移出群的会话 | 不会（也不进回填） |
+| `wake`（"→ 某人：已唤醒"） | 不会 |
+
+早先无条件镜像每个成员的每条 `assistant/message` —— 结果任何在群里的会话
+（包括做插件开发的、聊天的）写什么都被贴进群，群里变成某个会话的独白，
+连截断提示都被广播。现在按「是否有在办任务」判断，这个门槛是这条规则的实现。
+
+另外：**不要把"做完某件事的开发会话"留在群里当成员** —— 它会持续被当成参与者。
+成员应该是真正干活的 lane。
 
 ## 为什么群里看得到每个人说话（而不是组长的分身）
 

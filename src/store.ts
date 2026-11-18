@@ -355,6 +355,23 @@ export async function markRoomMirrored(groupId: string, messageId: string): Prom
   await ledgerQueue
 }
 
+/** 清空某个群的镜像账本（重建群会话时用：新会话需要重新写一遍）。 */
+export async function clearRoomMirrorLedger(groupId: string): Promise<void> {
+  await seedLedger()
+  for (const entry of [...ledger]) {
+    if (entry.startsWith(`${groupId}|`)) ledger.delete(entry)
+  }
+  const run = async (): Promise<void> => {
+    const store = await load()
+    const group = store.groups[groupId]
+    if (group === undefined) return
+    group.roomMirrored = []
+    await flush(store)
+  }
+  ledgerQueue = ledgerQueue.then(run, run)
+  await ledgerQueue
+}
+
 export async function isRoomMirrored(groupId: string, messageId: string): Promise<boolean> {
   await seedLedger()
   if (ledger.has(`${groupId}|${messageId}`)) return true
