@@ -361,6 +361,34 @@ export function apply(ctx: any, config: Config = {}): void {
 
   installRelay()
 
+  /**
+   * 自愈 client 模块注册。
+   *
+   * 宿主的 `clientModules` 按 (loaderName, baseUrl) 缓存 package.json 的解析结果。
+   * 热重载/重启后，缓存里可能是「这个包没有 dsh.client」的旧结论 ——
+   * 于是侧栏图标消失，而宿主照样把插件 fiber 标成 active。
+   * 注入器只对自己清这条缓存，对注入进来的插件不清，所以这里自己清一次并重解析。
+   */
+  const healClientRegistration = (): void => {
+    const modules = resolveService<any>(ctx, 'clientModules')
+    if (modules === undefined) return
+    try {
+      if (modules.pkgMeta && typeof modules.pkgMeta.delete === 'function') {
+        for (const key of [...modules.pkgMeta.keys()]) {
+          if (String(key).includes(name)) modules.pkgMeta.delete(key)
+        }
+      }
+      if (typeof modules.processOne === 'function') {
+        void Promise.resolve(modules.processOne(name)).catch((error: unknown) => {
+          log.warn(`client 模块重解析失败：${String(error)}`)
+        })
+      }
+    } catch (error) {
+      log.warn(`client 模块自愈异常：${String(error)}`)
+    }
+  }
+  healClientRegistration()
+
   // ── HTTP：面板 + 外部产品桥接 ──
   registerRoutes({
     ctx,
