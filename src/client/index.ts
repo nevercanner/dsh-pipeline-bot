@@ -256,6 +256,7 @@ window.__ModuleLoader__.load({
       const [groupRef, setGroupRef] = React.useState('')
       const [tab, setTab] = React.useState('chat')
       const [newMember, setNewMember] = React.useState({ name: '', sessionId: '', product: '', duty: '', glyph: '' })
+      const [bindPick, setBindPick] = React.useState({})
       const [newGroup, setNewGroup] = React.useState('')
       const [projects, setProjects] = React.useState([])
       const [newGroupProject, setNewGroupProject] = React.useState('')
@@ -458,6 +459,53 @@ window.__ModuleLoader__.load({
                 h('input', { style: { ...S.select, width: 84 }, placeholder: '头像 emoji', value: newMember.glyph, onChange: (e) => setNewMember({ ...newMember, glyph: e.target.value }) }),
                 h('button', { style: S.btn, onClick: () => void addManual() }, '加入群'),
               ),
+              h('div', { style: { fontWeight: 600, marginTop: 8 } }, '未绑定会话的成员（绑定后才能被 @ 叫醒）'),
+              (() => {
+                const unbound = members.filter((member) => member.sessionId === '' && member.role !== 'external')
+                if (unbound.length === 0) return h('div', { style: { fontSize: 11, opacity: 0.7 } }, '全部成员都已绑定。')
+                const options = candidates.slice(0, 40)
+                return h(
+                  'div',
+                  { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                  unbound.map((member) =>
+                    h(
+                      'div',
+                      { key: member.name, style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                      h('span', { style: { fontSize: 12 } }, `${member.avatar?.glyph ?? '?'} ${member.name}`),
+                      h(
+                        'select',
+                        {
+                          style: { ...S.select, minWidth: 160 },
+                          value: bindPick[member.name] ?? '',
+                          onChange: (event) => setBindPick({ ...bindPick, [member.name]: event.target.value }),
+                        },
+                        h('option', { value: '' }, '选择要绑定的会话…'),
+                        options.map((candidate) =>
+                          h(
+                            'option',
+                            { key: candidate.sessionId, value: candidate.sessionId },
+                            `${candidate.name}（${candidate.project ?? '?'}·${candidate.status}）`,
+                          ),
+                        ),
+                      ),
+                      h(
+                        'button',
+                        {
+                          style: S.btn,
+                          onClick: () =>
+                            act(async () => {
+                              const to = bindPick[member.name] ?? ''
+                              if (to === '') throw new Error('先选一个会话')
+                              await postJson('/bind', { group: groupRef, member: member.name, to })
+                              setBindPick({ ...bindPick, [member.name]: '' })
+                            }),
+                        },
+                        '绑定',
+                      ),
+                    ),
+                  ),
+                )
+              })(),
               h('div', { style: { fontWeight: 600, marginTop: 6 } }, '移除成员'),
               h(
                 'div',

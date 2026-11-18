@@ -170,6 +170,31 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
   })
 
   register({
+    name: 'pipeline_bind',
+    description:
+      '把群成员绑定到宿主里的某个会话（按候选名 / 成员 id / session id）。' +
+      '群成员常是「人起的名字」（如「跑章选手」），而会话叫 chapter —— 名字对不上就永远叫不醒。' +
+      '绑定一次即可；先用 pipeline_members 的 candidates 看有哪些可绑。',
+    parameters: {
+      type: 'object',
+      properties: {
+        member: { type: 'string', description: '群成员名（或 id）' },
+        to: { type: 'string', description: '要绑定的会话：候选名、成员 id 或 session id' },
+        group: { type: 'string', description: '（可选）群标题或 id' },
+      },
+      required: ['member', 'to'],
+    },
+    output: { schema: RESULT_SCHEMA, render: renderResult },
+    async execute(args: any, exec: any) {
+      const bus = await deps.busForCaller(exec, args?.group)
+      const result = await bus.bindMember(asText(args?.member), asText(args?.to))
+      return asResult(
+        `已把「${result.member.name}」绑定到会话 ${result.member.sessionId}（状态 ${result.member.status}）。`,
+      )
+    },
+  })
+
+  register({
     name: 'pipeline_members',
     description:
       '列出群成员（头像、名字、id、角色、在不在线、属于哪个项目）以及**可加入的候选会话**（宿主里所有项目）。' +

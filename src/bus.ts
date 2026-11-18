@@ -173,11 +173,40 @@ export class GroupBus {
         product: record.product ?? 'external',
       }))
     // 进程内绑定优先：文件可能被并发写冲掉，但绑定本身不该丢
-    const withBindings = group.members.map((record) => {
-      if (record.sessionId !== undefined && record.sessionId !== '') return record
+    const withBindings: typeof group.members = []
+    for (const record of group.members) {
+      if (record.sessionId !== undefined && record.sessionId !== '') {
+        withBindings.push(record)
+        continue
+      }
       const bound = boundSessionOf(group.id, record.name)
-      return bound === undefined ? record : { ...record, sessionId: bound }
-    })
+      if (bound !== undefined) {
+        withBindings.push({ ...record, sessionId: bound })
+        continue
+      }
+      // 还没绑定：按名字在候选池里找一次，找到就绑（并落盘），
+      // 否则成员永远显示"无会话"、@ 也永远叫不醒。
+      if (record.role === 'external') {
+        withBindings.push(record)
+        continue
+      }
+      const wanted = normalizeName(record.name)
+      const guess =
+        pool.candidates.find((item) => normalizeName(item.name) === wanted) ??
+        pool.candidates.find((item) => normalizeName(item.id) === wanted)
+      if (guess === undefined) {
+        withBindings.push(record)
+        continue
+      }
+      await bindSession(group.id, record.name, guess.sessionId)
+      void syncName(
+        this.deps.logger === undefined ? {} : { logger: this.deps.logger },
+        guess.cwd ?? '',
+        guess.sessionId,
+        record.name,
+      )
+      withBindings.push({ ...record, sessionId: guess.sessionId })
+    }
     const members = resolveMembers(withBindings, pool.candidates, externals)
     // 在线状态以「此刻活着没有」为准
     for (const member of members) {
@@ -408,8 +437,16 @@ export class GroupBus {
         continue
       }
       if (member.sessionId === '') {
-        // 没有绑定会话的成员（例如只在元数据里占位的组长）不投递、也不刷一条失败提示：
-        // 每条消息都提醒一次「未投递」纯噪音，人看一眼成员列表就知道它离线。
+        // 没绑定会话 = 叫不醒。必须**如实报失败**：
+        // 早先这里静默跳过，结果 assign 把任务标成 dispatched、发起人以为派成功了，
+        // 实际没有一个人被唤醒（用户看到的就是「派了但没人回」）。
+        deliveries.push({
+          name: member.name,
+          sessionId: '',
+          detail: '未绑定会话（先在面板或用 pipeline_bind 绑定）',
+          ok: false,
+          outcome: 'unbound',
+        })
         continue
       }
       const body = this.composeWake({ options, member, members, text, group, taskId: options.taskId })
@@ -729,6 +766,45 @@ export class GroupBus {
       }
     }
     return group
+  }
+
+  /**
+   * 把群成员绑定到某个会话（按候选名 / 成员 id / session id 解析）。
+   *
+   * 用途：群成员常是「人起的名字」（跑章选手、门禁），而宿主里的会话叫
+   * chapter / gate —— 名字对不上就永远叫不醒。绑定一次即可。
+   */
+  async bindMember(memberName: string, to: string): Promise<{ member: Member; candidates: string[] }> {
+    const group = await this.group()
+    const { members, candidates } = await this.members()
+    const target = this.resolveMember(members, memberName)
+    if (target === undefined) throw new Error(`群里没有这个成员：${memberName}`)
+    const ref = asText(to).trim()
+    const wanted = normalizeName(ref)
+    const candidate =
+      candidates.find((item) => item.sessionId === ref) ??
+      candidates.find((item) => normalizeName(item.name) === wanted) ??
+      candidates.find((item) => normalizeName(item.name).includes(wanted))
+    if (candidate === undefined) {
+      throw new Error(
+        `找不到会话「${ref}」。可绑定的候选：${candidates
+          .slice(0, 12)
+          .map((item) => item.name)
+          .join('、')}`,
+      )
+    }
+    await bindSession(group.id, target.name, candidate.sessionId)
+    void syncName(
+      this.deps.logger === undefined ? {} : { logger: this.deps.logger },
+      candidate.cwd ?? '',
+      candidate.sessionId,
+      target.name,
+    )
+    const refreshed = await this.members()
+    return {
+      member: this.resolveMember(refreshed.members, target.name) ?? target,
+      candidates: refreshed.candidates.slice(0, 12).map((item) => item.name),
+    }
   }
 
   async removeMember(ref: string): Promise<Group> {

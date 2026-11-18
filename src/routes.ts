@@ -333,6 +333,11 @@ export function registerRoutes(deps: RouteDeps): () => void {
           sendJson(res, 200, { ok: true, members: group.members })
           return
         }
+        if (route === '/bind') {
+          const result = await bus.bindMember(asText(body['member']), asText(body['to']))
+          sendJson(res, 200, { ok: true, member: result.member, candidates: result.candidates })
+          return
+        }
         if (route === '/clear') {
           const group = await bus.clear()
           await store.appendMessage(group.id, { from: 'system', role: 'system', kind: 'system', text: '群消息已清空。' })

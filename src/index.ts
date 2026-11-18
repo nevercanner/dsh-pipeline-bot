@@ -24,6 +24,7 @@
  *   ② 群成员是**显式加入**的 —— 加入本身就是意图声明，不再需要项目级开关
  */
 import { GroupBus, normalizeName, wasRecentlyWoken } from './bus.ts'
+import { boundSessionOf } from './store.ts'
 import { collectNames } from './discovery.ts'
 import { installMemberMirror } from './mirror.ts'
 
@@ -259,12 +260,23 @@ export function apply(ctx: any, config: Config = {}): void {
    * 两者合起来，群里看到的是每个成员各自说的话；群聊会话本身不跑模型。
    */
   const installRelay = (): void => {
+    /**
+     * 找出「这个会话属于哪些群」。
+     *
+     * 关键：必须把**进程内绑定**也算上。成员的 `sessionId` 可能还没落盘
+     * （被并发写冲掉，或只是按名字加入、尚未绑定），只比记录里的字段会漏掉，
+     * 表现就是「@ 醒了、它回了、群里没有」。
+     */
+    const memberMatches = (groupId: string, member: { name: string; sessionId?: string }, sessionId: string): boolean => {
+      if (sessionId === '') return false
+      if (member.sessionId === sessionId) return true
+      return boundSessionOf(groupId, member.name) === sessionId
+    }
     const groupsOfSession = async (sessionId: string): Promise<string[]> => {
       const ids: string[] = []
       for (const item of await store.listGroups()) {
         const group = await store.getGroup(item.id)
-        if (group.roomSessionId === sessionId && sessionId !== '') continue
-        if (group.members.some((member) => member.sessionId === sessionId)) ids.push(group.id)
+        if (group.members.some((member) => memberMatches(group.id, member, sessionId))) ids.push(group.id)
       }
       return ids
     }
@@ -275,7 +287,7 @@ export function apply(ctx: any, config: Config = {}): void {
       roomOfGroup,
       async record(sessionId, groupId, text, seq) {
         const group = await store.getGroup(groupId)
-        const member = group.members.find((item) => item.sessionId === sessionId)
+        const member = group.members.find((item) => memberMatches(groupId, item, sessionId))
         if (member === undefined) return
         /**
          * 只镜像「正在回群里的活」的回复。

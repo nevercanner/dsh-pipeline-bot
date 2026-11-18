@@ -127,8 +127,36 @@ async function resumeAgent(
   }
 }
 
+/**
+ * 查这个会话最近一次 turn 为什么结束。
+ *
+ * 用途：唤醒没生效时给出**真实原因**。实测最常见的是 `blocked`——
+ * 会话被归档后，宿主在 pre-step 之前就把 turn 结束了（连 pre-step 都不进），
+ * 表现就是「已冷启动、消息在队列中、就是不回」，用户完全看不出为什么。
+ */
+async function lastTurnBlocked(ctx: any, sessionId: string): Promise<boolean> {
+  const query = (() => {
+    try {
+      return ctx?.get?.('sessionQuery') ?? ctx?.sessionQuery
+    } catch {
+      return undefined
+    }
+  })()
+  if (typeof query?.listEvents !== 'function' || typeof query?.readEvent !== 'function') return false
+  try {
+    const events = (await query.listEvents(sessionId)) as any[]
+    const last = [...events].reverse().find((event) => event?.type === 'turn/end')
+    if (last === undefined) return false
+    const window = await query.readEvent({ sessionId, seq: last.seq, before: 0, after: 0 })
+    const reason = window?.target?.data?.reason
+    return reason?.kind === 'blocked'
+  } catch {
+    return false
+  }
+}
+
 /** 反复叫 wakeDriver，直到它真的离开 idle（冷启动后的过渡态会把第一次唤醒吞掉）。 */
-async function wakeUntilRunning(agent: any, attempts = 8, intervalMs = 150): Promise<boolean> {
+async function wakeUntilRunning(agent: any, attempts = 20, intervalMs = 250): Promise<boolean> {
   if (typeof agent?.wakeDriver !== 'function') return false
   for (let index = 0; index < attempts; index += 1) {
     try {
@@ -204,7 +232,53 @@ export async function deliver(
       // 冷启动后 steer 会被过渡态吞掉：followup 进下一轮队列，再显式顶驱动
       if (typeof agent.followup === 'function') agent.followup(message)
       else agent.send(message, 'next-turn', true)
-      const woken = await wakeUntilRunning(agent)
+      let woken = await wakeUntilRunning(agent)
+      if (!woken) {
+        // 兜底：用宿主的 prompt 正式受理一条（它本身就会起一轮）。
+        // 实测冷启动 + wakeDriver 在长会话上不可靠（跑了 1 万条事件的会话就不动），
+        // 只靠 wakeDriver 会一直停在"唤醒未生效"。
+        const controller = (() => {
+          try {
+            return options.ctx?.get?.('sessionController') ?? options.ctx?.sessionController
+          } catch {
+            return undefined
+          }
+        })()
+        if (typeof controller?.prompt === 'function') {
+          try {
+            await controller.prompt(
+              {
+                requestId: `pipeline-wake-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                sessionId: target,
+                mode: 'queue',
+                content: [{ type: 'text', text }],
+              },
+              new AbortController().signal,
+            )
+            woken = await wakeUntilRunning(agent, 20, 250)
+            if (woken) {
+              return {
+                ok: true,
+                live: true,
+                outcome: 'queued',
+                detail: '已冷启动，并用 prompt 兜底起了一轮',
+                sessionId: target,
+              }
+            }
+          } catch (error) {
+            options.logger?.warn?.(`[dsh-pipeline-bot] prompt 兜底失败（${target}）：${String(error)}`)
+          }
+        }
+      }
+      if (!woken && (await lastTurnBlocked(options.ctx, target))) {
+        return {
+          ok: false,
+          live: true,
+          outcome: 'failed',
+          detail: '目标会话被门禁阻塞（多半是已归档）：turn 被 blocked，请先取消归档再唤醒',
+          sessionId: target,
+        }
+      }
       return {
         ok: true,
         live: true,
