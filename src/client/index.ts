@@ -257,6 +257,7 @@ window.__ModuleLoader__.load({
       const [tab, setTab] = React.useState('chat')
       const [newMember, setNewMember] = React.useState({ name: '', sessionId: '', product: '', duty: '', glyph: '' })
       const [bindPick, setBindPick] = React.useState({})
+      const [notice, setNotice] = React.useState('')
       const [newGroup, setNewGroup] = React.useState('')
       const [projects, setProjects] = React.useState([])
       const [newGroupProject, setNewGroupProject] = React.useState('')
@@ -496,7 +497,8 @@ window.__ModuleLoader__.load({
                             act(async () => {
                               const to = bindPick[member.name] ?? ''
                               if (to === '') throw new Error('先选一个会话')
-                              await postJson('/bind', { group: groupRef, member: member.name, to })
+                              const res: any = await postJson('/bind', { group: groupRef, member: member.name, to })
+                              setNotice(res?.member ? `「${res.member.name}」已绑定到 ${res.member.sessionId}` : '已绑定')
                               setBindPick({ ...bindPick, [member.name]: '' })
                             }),
                         },

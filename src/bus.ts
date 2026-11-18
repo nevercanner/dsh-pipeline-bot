@@ -207,7 +207,15 @@ export class GroupBus {
       )
       withBindings.push({ ...record, sessionId: guess.sessionId })
     }
-    const members = resolveMembers(withBindings, pool.candidates, externals)
+    // 结构性去重：同名成员只保留一条（历史上的重复记录不再显示成两个人）
+    const seenNames = new Set<string>()
+    const uniqueRecords = withBindings.filter((record) => {
+      const key = normalizeName(record.name)
+      if (key === '' || seenNames.has(key)) return false
+      seenNames.add(key)
+      return true
+    })
+    const members = resolveMembers(uniqueRecords, pool.candidates, externals)
     // 在线状态以「此刻活着没有」为准
     for (const member of members) {
       if (member.role === 'external' || member.sessionId === '') continue
@@ -224,10 +232,11 @@ export class GroupBus {
       )
     }
     const addedIds = new Set(members.map((member) => member.sessionId).filter((id) => id !== ''))
-    const addedNames = new Set(members.map((member) => normalizeName(member.name)))
+    // 只按 sessionId 判"已加入"：按名字判会把「同名但不同会话」误标成已加入，
+    // 面板上看起来像"同一个人出现两次"。
     const candidates = pool.candidates.map((candidate) => ({
       ...candidate,
-      added: addedIds.has(candidate.sessionId) || addedNames.has(normalizeName(candidate.name)),
+      added: addedIds.has(candidate.sessionId),
     }))
     return { group, members, candidates }
   }
@@ -755,8 +764,23 @@ export class GroupBus {
     id?: string
     glyph?: string
     image?: string
-  }): Promise<Group> {
+  }): Promise<Group & { detail?: string }> {
+    const before = await this.group()
+    const existed = before.members.some(
+      (item) => normalizeName(item.name) === normalizeName(member.name),
+    )
     const group = await addMember(this.deps.groupId, member)
+    const after = group.members.find((item) => normalizeName(item.name) === normalizeName(member.name))
+    const beforeSid = before.members.find(
+      (item) => normalizeName(item.name) === normalizeName(member.name),
+    )?.sessionId ?? ''
+    const afterSid = after?.sessionId ?? ''
+    const detail = !existed
+      ? `已把「${after?.name ?? member.name}」加入群`
+      : beforeSid === afterSid
+        ? `「${after?.name ?? member.name}」已经在群里了（无变化）`
+        : `「${after?.name ?? member.name}」已改绑到 ${afterSid}`
+    ;(group as any).detail = detail
     // 同步到会话总线名册：让 dsh_bus_* 也能用群里的同一个名字寻址
     const sessionId = asText(member.sessionId).trim()
     if (sessionId !== '') {

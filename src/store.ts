@@ -267,12 +267,29 @@ export async function addMember(
   const glyph = asText(member.glyph).trim()
   const image = asText(member.image).trim()
 
-  const duplicated = group.members.some(
-    (item) =>
-      (sessionIdIn !== '' && item.sessionId === sessionIdIn) ||
-      asText(item.name).trim().toLowerCase() === name.toLowerCase(),
+  /**
+   * 去重规则（行为要可解释，不能静默）：
+   *   · 同名已存在 + 带新的 sessionId → **改绑**到新会话（这就是"把人拉进来/换会话"）
+   *   · 同名已存在 + 没带 sessionId → 视为已加入，原样返回（调用方据此提示"已在群里"）
+   *   · sessionId 已被别的成员占用 → 拒绝，避免一个会话出现在两个名字下
+   * 早先这里对同名一律静默 return，用户点"添加"看不到任何变化，以为坏了。
+   */
+  const byName = group.members.find(
+    (item) => asText(item.name).trim().toLowerCase() === name.toLowerCase(),
   )
-  if (duplicated) return group
+  if (byName !== undefined) {
+    if (sessionIdIn === '' || byName.sessionId === sessionIdIn) return group
+    const taken = group.members.some(
+      (item) => item !== byName && sessionIdIn !== '' && item.sessionId === sessionIdIn,
+    )
+    if (taken) throw new Error(`该会话已经绑定在别的成员上：${sessionIdIn}`)
+    byName.sessionId = sessionIdIn
+    group.updatedAt = Date.now()
+    await flush(store)
+    return group
+  }
+  const duplicatedSession = sessionIdIn !== '' && group.members.some((item) => item.sessionId === sessionIdIn)
+  if (duplicatedSession) throw new Error(`该会话已经在群里了：${sessionIdIn}`)
 
   // 稳定且唯一的 id：默认 = 会话名（用户重置的名字），撞了就加 -2/-3
   const base = memberIdOf(asText(member.id).trim() === '' ? name : asText(member.id).trim())
