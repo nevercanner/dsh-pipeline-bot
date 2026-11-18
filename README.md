@@ -22,6 +22,30 @@
 - 派活会登记成任务，回执会自动叫醒派活人收尾
 - 群里发生的一切都留痕，人能随时插话
 
+## 架构：群是插件自己的窗口，不是会话
+
+这一条是被纠正过两次才对的，写清楚免得走回去。
+
+参考成熟实现（`omdsh-dev/dsh-bot`、`MJ-CJM/DSH-Bot`）的做法：
+
+- 群历史放在**插件自己的存储**（`bot_history_*` 分块 + `Room.messages`），
+  由插件自己的 Client 组件渲染（`docs/architecture.md`）
+- 每个成员只在**自己的** native Session 里跑上下文
+- 群窗口挂在 `sidebar.panellist` + `main`，不占用会话
+
+我早先把「群」做成了一个真会话（`[群聊] xx`，有自己的 session id），代价是：
+
+1. 它看起来就是个会话，不是群窗口；
+2. 每条群消息都要过一轮模型请求，而为了不让它冒充发言人我把 `maxTokens` 压到 1
+   —— 每轮都以 `max-tokens` 结束，DSH 的 UI 就显示
+   「已达到输出 token 上限…发送继续」，看起来像群坏了；
+3. 会话日志里堆满 `agent/inbox/spliced` 与重复消息。
+
+**现在的做法**：群只存在于插件（`groups.json` + 面板）；给成员投递走 inbox/steer；
+成员回复通过 `session/event` 捕获写进群存储。**群消息不产生任何会话轮次。**
+
+> 验证：在群里发一条消息，40 个采样会话的 `updatedAt` **0 个变化**，`snapshot.roomSessionId` 为空。
+
 ## 核心模型：群是元数据，不是项目
 
 ```
@@ -45,8 +69,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.4.1.tgz`](./dist/dsh-pipeline-bot-0.4.1.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.4.1.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.5.0.tgz`](./dist/dsh-pipeline-bot-0.5.0.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.5.0.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 

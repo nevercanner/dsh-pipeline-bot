@@ -359,7 +359,7 @@ window.__ModuleLoader__.load({
             h('option', { value: '' }, `（当前：${snap?.group?.title ?? '默认群'}）`),
             groups.map((group) => h('option', { key: group.id, value: group.id }, `${group.title}（${group.memberCount}人）`)),
           ),
-          h('span', { style: S.sub }, `${members.length} 人 · ${messages.length} 条`),
+          h('span', { style: S.sub }, `${members.length} 人 · ${messages.length} 条消息`),
           h('span', { style: { flex: 1 } }),
           h(
             'button',
@@ -458,24 +458,6 @@ window.__ModuleLoader__.load({
                 h('input', { style: { ...S.select, width: 84 }, placeholder: '头像 emoji', value: newMember.glyph, onChange: (e) => setNewMember({ ...newMember, glyph: e.target.value }) }),
                 h('button', { style: S.btn, onClick: () => void addManual() }, '加入群'),
               ),
-              h('div', { style: { fontWeight: 600, marginTop: 6 } }, '群聊会话'),
-              h(
-                'div',
-                { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
-                h('span', { style: { fontSize: 11, opacity: 0.7 } }, `当前会话：${snap?.roomSessionId || '（未创建）'}`),
-                h(
-                  'button',
-                  {
-                    style: S.btn,
-                    title: '新建一个干净的群聊会话，把最近的有效消息补写进去，旧会话归档',
-                    onClick: () =>
-                      act(async () => {
-                        await postJson('/room/rebuild', { group: groupRef, limit: 20 })
-                      }),
-                  },
-                  '重建群会话',
-                ),
-              ),
               h('div', { style: { fontWeight: 600, marginTop: 6 } }, '移除成员'),
               h(
                 'div',
@@ -528,7 +510,7 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { style: { opacity: 0.6, marginTop: 4 } },
-                `群聊会话：${snap.roomSessionId || '（未创建）'} · 落在项目：${snap.group?.projectRoot || '（未指定）'}`,
+                `群历史存在插件里（${(snap?.group?.messages ?? []).length} 条），不占用任何会话`,
               ),
             )
           : null,

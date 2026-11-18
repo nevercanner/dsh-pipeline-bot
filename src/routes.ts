@@ -325,28 +325,6 @@ export function registerRoutes(deps: RouteDeps): () => void {
           sendJson(res, 200, { ok: true, members: group.members })
           return
         }
-        if (route === '/room') {
-          const preferredRaw = asText(body['projectRoot']).trim()
-          const preferred = preferredRaw === '' ? undefined : preferredRaw
-          const sessionId = await bus.ensureRoomSession(preferred)
-          const group = await bus.group()
-          sendJson(res, 200, {
-            ok: sessionId !== '',
-            sessionId,
-            projectRoot: group.projectRoot ?? '',
-            detail:
-              sessionId === ''
-                ? '未能创建群聊会话（需先指定一个已存在的项目）'
-                : '群聊会话就绪（已在项目会话列表第一位）',
-          })
-          return
-        }
-        if (route === '/room/rebuild') {
-          const limit = Math.min(60, Math.max(0, Number(body['limit'] ?? 20) || 20))
-          const result = await bus.rebuildRoom(limit)
-          sendJson(res, 200, { ok: result.sessionId !== '', ...result })
-          return
-        }
         if (route === '/clear') {
           const group = await bus.clear()
           await store.appendMessage(group.id, { from: 'system', role: 'system', kind: 'system', text: '群消息已清空。' })

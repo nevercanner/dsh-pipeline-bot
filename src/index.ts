@@ -26,7 +26,7 @@
 import { GroupBus, normalizeName, wasRecentlyWoken } from './bus.ts'
 import { collectNames } from './discovery.ts'
 import { installMemberMirror } from './mirror.ts'
-import { installRoomModelMute, installRoomRelay } from './relay.ts'
+
 import { registerRoutes } from './routes.ts'
 import { registerBusTools } from './tools.ts'
 import * as store from './store.ts'
@@ -268,18 +268,7 @@ export function apply(ctx: any, config: Config = {}): void {
       }
       return ids
     }
-    const roomOfGroup = async (groupId: string): Promise<string> => {
-      const group = await store.getGroup(groupId)
-      return group.roomSessionId ?? ''
-    }
-    const groupOfRoom = async (sessionId: string): Promise<string | undefined> => {
-      for (const item of await store.listGroups()) {
-        const group = await store.getGroup(item.id)
-        if (group.roomSessionId !== undefined && group.roomSessionId === sessionId) return group.id
-      }
-      return undefined
-    }
-
+    const roomOfGroup = async (): Promise<string> => ''   // 群不再有会话
     const mirror = installMemberMirror({
       ctx,
       groupsOfSession,
@@ -321,32 +310,19 @@ export function apply(ctx: any, config: Config = {}): void {
       logger: log,
     })
 
-    const relay = installRoomRelay({
-      ctx,
-      groupOfRoom,
-      async dispatch(groupId, text) {
-        const bus = await busFor(groupId)
-        const result = await bus.speak({ from: '我', role: 'human', kind: 'human', text })
-        return { targets: result.targets }
-      },
-      logger: log,
-    })
-
-    const mute = installRoomModelMute({
-      ctx,
-      groupOfRoom,
-      dispatch: async () => ({ targets: [] }),
-      logger: log,
-    })
-
+    /**
+     * 只装「成员回复进群」这一半。
+     *
+     * 输入方向不再靠会话中继：人在**面板**里说话就走 HTTP /say 分派给成员，
+     * 不需要一个会话替人转达。这样群完全不经过模型轮次，
+     * 也就不会出现「输出到 token 上限」之类的会话提示。
+     */
     if (typeof ctx.effect === 'function') {
       ctx.effect(() => () => {
         mirror.dispose()
-        relay.dispose()
-        mute.dispose()
-      }, 'pipeline-bot: relay')
+      }, 'pipeline-bot: mirror')
     }
-    log.info('双向中继已安装（成员回复进群；群聊会话输入分派给成员）')
+    log.info('成员回复镜像已安装（群历史在插件存储，不经会话）')
   }
 
   /** 不指定群时：优先「调用者所在的群」，否则默认群。 */

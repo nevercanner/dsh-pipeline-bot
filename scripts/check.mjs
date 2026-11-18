@@ -171,8 +171,9 @@ dup === 1 ? ok('回执收齐 → 只唤醒一次（无重复）') : bad('回执�
 const done = await store.findTask(group.id, assign.task.id)
 done?.status === 'reported' ? ok('任务状态收口为 reported') : bad('任务状态不符', String(done?.status))
 
+// 群**不**占用会话：参考实现把群历史放在插件自己的存储/渲染里
 const room = await bus.ensureRoomSession('D:/pA')
-room === 's-room' ? ok('群聊会话落在指定项目') : bad('群聊会话 id 不符', room)
+room === '' ? ok('群不创建任何会话（历史只在插件存储）') : bad('群仍在创建会话', room)
 const anchored = await store.getGroup(group.id)
 anchored.projectRoot === 'D:/pA' ? ok('群元数据记录锚定项目') : bad('锚定项目未记录', String(anchored.projectRoot))
 

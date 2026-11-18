@@ -285,7 +285,13 @@ export class GroupBus {
    * 群聊会话：落在**已存在的项目**里（群的 projectRoot，或调用方项目），
    * 并固定在会话列表第一位。群与成员的关系记在群元数据里。
    */
+  /** 兼容旧调用：群不再有会话。 */
   async ensureRoomSession(preferredProject?: string): Promise<string> {
+    void preferredProject
+    return ''
+  }
+
+  private async ensureRoomSessionLegacy(preferredProject?: string): Promise<string> {
     const group = await this.group()
     const room = await ensureRoom(
       { ctx: this.deps.ctx, ...(this.deps.logger === undefined ? {} : { logger: this.deps.logger }) },
@@ -308,9 +314,21 @@ export class GroupBus {
    *   ② **只写有信息量的**：wake（"→ 某人：已唤醒"）这类高频噪音不写 ——
    *      每写一条都要过一次群会话的请求，而它的上下文会越来越长，成本随之上升
    */
+  /**
+   * 群消息**不写入任何会话**。
+   *
+   * 参考实现（MJ-CJM/DSH-Bot、omdsh-dev/dsh-bot）把群历史放在插件自己的
+   * storage domain，由插件自己的 Client 组件渲染；会话只用于成员各自的上下文。
+   *
+   * 我早先把群写成「一个真会话」，代价是：每条群消息都要过一轮模型请求，
+   * 而为了不让它冒充发言人我把 maxTokens 压到 1 —— 结果每轮都以 max-tokens 结束，
+   * DSH 的 UI 就显示出「已达到输出 token 上限…发送继续」，看起来像群坏了。
+   * 现在群只存在于插件（存储 + 面板），彻底不碰会话轮次。
+   */
   private async mirrorToRoom(message: Message): Promise<void> {
     try {
-      if (message.kind === 'wake') return
+      void message
+      return
       const group = await this.group()
       const roomId = group.roomSessionId ?? ''
       if (roomId === '') return
