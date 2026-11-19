@@ -258,6 +258,7 @@ window.__ModuleLoader__.load({
       const [newMember, setNewMember] = React.useState({ name: '', sessionId: '', product: '', duty: '', glyph: '' })
       const [bindPick, setBindPick] = React.useState({})
       const [notice, setNotice] = React.useState('')
+      const [bindIdText, setBindIdText] = React.useState('')
       const [newGroup, setNewGroup] = React.useState('')
       const [projects, setProjects] = React.useState([])
       const [newGroupProject, setNewGroupProject] = React.useState('')
@@ -468,6 +469,35 @@ window.__ModuleLoader__.load({
                 return h(
                   'div',
                   { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                  h(
+                    'div',
+                    { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                    h(
+                      'input',
+                      {
+                        style: { ...S.input, minWidth: 260 },
+                        placeholder: '按 session id 绑定：成员名 = session-xxxx',
+                        value: bindIdText,
+                        onChange: (event) => setBindIdText(event.target.value),
+                      },
+                    ),
+                    h(
+                      'button',
+                      {
+                        style: S.btn,
+                        onClick: () =>
+                          act(async () => {
+                            const raw = String(bindIdText).trim()
+                            const m = /^(.+?)\s*[=＝>→]\s*(session-[\w-]+)$/.exec(raw)
+                            if (m === null) throw new Error('格式：成员名 = session-xxxx')
+                            const res: any = await postJson('/bind', { group: groupRef, member: m[1].trim(), to: m[2] })
+                            setNotice(res?.member ? `「${res.member.name}」已绑定到 ${res.member.sessionId}` : '已绑定')
+                            setBindIdText('')
+                          }),
+                      },
+                      '绑定',
+                    ),
+                  ),
                   unbound.map((member) =>
                     h(
                       'div',

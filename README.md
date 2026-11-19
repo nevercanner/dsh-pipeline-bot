@@ -69,8 +69,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.5.4.tgz`](./dist/dsh-pipeline-bot-0.5.4.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.5.4.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.5.5.tgz`](./dist/dsh-pipeline-bot-0.5.5.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.5.5.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 
@@ -250,6 +250,22 @@ npm run verify
 - 每次读成员列表会幂等回填一遍，老成员也会进名册
 - 投递目标不在群里时，按 名字 / 成员 id / 会话标题 / session id 在候选池里匹配，
   命中就**自动认领入群**再投递；确实找不到才报错，并列出可加入的候选
+
+## 安装方式：装进 profile，不要只做运行时注入
+
+侧栏图标反复消失的根因是**注入方式**：`dev_inject_plugin` 是运行时注入，
+不写 profile。DSH 重启后插件是在**页面启动之后**才注入的，
+这一次页面永远拿不到 client bundle —— 图标就一直不出现，直到你手动刷新。
+
+正确做法是把包装进 profile（`dsh.profile.bundles` + `dependencies`），
+开机即加载，client 在页面启动时就注册好：
+
+```bash
+dsh plugin install @dsh-external/dsh-pipeline-bot    # 或用 dev_install_package
+```
+
+卸载时注入器会写一条 `disabled: true` 的 patch 阻断自装配；重新安装后要把它删掉，
+否则重启后仍被禁用。
 
 ## 热重载安全
 
