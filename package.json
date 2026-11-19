@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-pipeline-bot",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "DSH 群聊调度台：把任意多个 DSH 会话（可跨项目）与任意外部 agent 产品放进同一个群，互相 @、互相派活、互相唤醒干活。左侧栏入口 + 群聊面板 + 外部产品桥接。",
   "type": "module",
   "main": "lib/index.js",
