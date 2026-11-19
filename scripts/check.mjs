@@ -52,6 +52,12 @@ if (!existsSync(join(libDir, 'index.js'))) {
     }
   }
   if (syntaxBroken === 0) ok(`lib 下 ${files.length} 个产物语法通过`)
+  // 发言必须以 kind: 'say' 入群：写成 'report' 会被回执闸门拦下，
+  // 于是 pipeline_say 的「@ 谁就唤醒谁」全靠人类触发，成员之间永远叫不醒。
+  const toolsSrc = existsSync(join(libDir, 'tools.js')) ? readFileSync(join(libDir, 'tools.js'), 'utf8') : ''
+  toolsSrc.includes("kind: 'say'")
+    ? ok("pipeline_say 以 kind: 'say' 入群（成员发言能唤醒人，回执仍不唤醒）")
+    : bad('pipeline_say 仍以 report 入群', '成员 @ 成员永远唤不醒，只有人能叫人')
 }
 
 // ── B. Client 半形态 ──
@@ -158,16 +164,53 @@ assign.task.deliveries.mavis?.includes('收件箱')
   ? ok('外部产品派活 → 进收件箱（降级不丢）')
   : bad('外部产品投递不符', JSON.stringify(assign.task.deliveries))
 
+// 唤醒闸门：只有「人手动发言」与「任务派发」能唤醒；
+// 成员回执（report）一律只记录、不唤醒 —— 否则「发言→写回群→再唤醒」会活锁。
+woken.length = 0
+// 成员之间互相唤醒（kind 不是 report）：这是多 agent 在群里协作的主通道，
+// 不能只允许「人叫人」——否则成员只能各自干活、抢不到对方。
+woken.length = 0
+const peer = await bus.speak({ from: 'chapter', role: 'member', kind: 'say', text: '@gate 你看下 s-b 那段判据' })
+peer.targets.includes('gate') && woken.includes('s-c')
+  ? ok(`成员 @ 成员 → 唤醒（${peer.targets.join('、')}）`)
+  : bad('成员之间无法互相唤醒', `targets=${JSON.stringify(peer.targets)} woken=${JSON.stringify(woken)}`)
+
 woken.length = 0
 const report = await bus.report('复核通过', { from: 'gate', taskId: assign.task.id })
-report.woke.includes('chapter') && woken.includes('s-b')
-  ? ok('回执 → 唤醒派活人（不是组长）')
-  : bad('回执唤醒不符', `woke=${report.woke} woken=${woken}`)
+report.woke.length === 0 && woken.length === 0
+  ? ok('回执不唤醒任何人（防活锁）')
+  : bad('回执仍会唤醒', `woke=${report.woke} woken=${woken}`)
 
 woken.length = 0
 await bus.report('润色完成', { from: 'mavis', taskId: assign.task.id })
-const dup = woken.filter((id) => id === 's-b').length
-dup === 1 ? ok('回执收齐 → 只唤醒一次（无重复）') : bad('回执收齐重复唤醒', `s-b 被唤醒 ${dup} 次`)
+const wakeCount = woken.filter((id) => id === 's-b').length
+wakeCount === 0
+  ? ok('回执收齐也不唤醒发起者（接受：靠人/派活推进）')
+  : bad('回执收齐仍在唤醒', `s-b 被唤醒 ${wakeCount} 次`)
+
+// 唤醒预算：60s 窗口内每群最多 3 次唤醒；超出的降级为「只入队不唤醒」。
+// 不断言“恰好 3 次”——同一个群在本次自检里已被前面的用例消耗过额度，
+// 这里断言的是**不变量**：窗口累计唤醒 ≤ 3，且至少有一次被标注预算用尽。
+woken.length = 0
+const speakResults = []
+for (let i = 0; i < 5; i += 1) {
+  speakResults.push(await bus.speak({ from: '我', role: 'human', kind: 'human', text: `@chapter 第${i + 1}次` }))
+}
+const budgetWakes = woken.length
+const budgetNotes = speakResults.flatMap((r) => r.deliveries ?? []).filter((d) => /唤醒预算用尽/.test(String(d.detail)))
+budgetWakes <= 3 && budgetNotes.length > 0
+  ? ok(`唤醒预算生效（本次共唤醒 ${budgetWakes} 次 ≤3，${budgetNotes.length} 条被降级为只入队）`)
+  : bad('唤醒预算不符', `唤醒 ${budgetWakes} 次 / 降级 ${budgetNotes.length} 条`)
+// 静音开关：静音后谁都不唤醒，note 要直指「群已静音」——
+// 否则人在面板上只会看到「没有唤醒任何人」，根本不知道是静音没关。
+await store.setMuted(group.id, true)
+woken.length = 0
+const quiet = await bus.speak({ from: '我', role: 'human', kind: 'human', text: '@chapter 静音下不该有任何人被叫醒' })
+quiet.targets.length === 0 && woken.length === 0 && /静音/.test(String(quiet.note))
+  ? ok('群静音 → 谁都不唤醒，提示直指静音开关')
+  : bad('群静音未生效', `targets=${JSON.stringify(quiet.targets)} woken=${JSON.stringify(woken)} note=${quiet.note}`)
+await store.setMuted(group.id, false)
+
 const done = await store.findTask(group.id, assign.task.id)
 done?.status === 'reported' ? ok('任务状态收口为 reported') : bad('任务状态不符', String(done?.status))
 

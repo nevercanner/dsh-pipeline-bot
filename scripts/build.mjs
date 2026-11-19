@@ -55,10 +55,37 @@ function rewriteImports(code) {
  *
  * 但源码里保留 `export const inject = ['slots']` 是有用的：
  * 注入器的落盘校验靠它确认「apply 用 ctx.slots 就必须声明 inject」。
- * 所以：源文件保留 export，构建产物剥成普通 const。
+ * 所以：源文件保留 export，构建产物剥成普通声明。
+ *
+ * ⚠️ 2026-11-19 事故：只把 `export const inject` 剥成裸 `const inject` 是**不够**的。
+ * 宿主（@deepseek-ai/dsh-client-modules）会用 buildComboScript 把多个插件的 client
+ * 半按顺序**裸源码拼接**成一个 combo 脚本再在同一个 <script> 里执行 ——
+ * 也就是说每个插件 client 的顶层 const/let 都落在**同一个脚本作用域**里，
+ * 会和宿主保留名 / 其它插件的同名顶层声明撞车，报：
+ *
+ *   Uncaught SyntaxError: Identifier 'inject' has already been declared
+ *
+ * 后果是整段 combo 解析失败、同批次的 ui-conversation / ui-chat 等模块一个都没
+ * 注册上 —— 表现为「引擎照常在跑，但所有会话的消息都看不见」。
+ * 所以 client 半的顶层 `inject` 必须换成一个不会撞的名字。
+ * 构建后再用 assertNoToplevelInject 兜底，防止有人改回裸 const。
  */
 function stripEsmForClient(code) {
-  return code.replace(/^export\s+(const|let|var|function|async\s+function)\s/gm, '$1 ')
+  return code
+    .replace(/^export\s+(const|let|var|function|async\s+function)\s/gm, '$1 ')
+    .replace(/^(const|let|var)\s+inject\b/gm, 'var __dshInject__')
+}
+
+/** combo 脚本是拼接执行的，顶层裸 `inject` 一定会炸；宁可构建失败也不要发布。 */
+function assertNoToplevelInject(code) {
+  const offenders = []
+  const lines = code.split('\n')
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^(?:const|let|var)\s+inject\b/.test(lines[i])) offenders.push(`${i + 1}: ${lines[i]}`)
+  }
+  if (offenders.length > 0) {
+    throw new Error(`client 半残留顶层 inject 声明（combo 拼接会 SyntaxError）：\n${offenders.join('\n')}`)
+  }
 }
 
 async function main() {
@@ -78,6 +105,7 @@ async function main() {
     let code = stripTypeScriptTypes(source, { mode: 'strip' })
     code = rewriteImports(code)
     if (isClient) code = stripEsmForClient(code)
+    if (isClient) assertNoToplevelInject(code)
     await ensureDir(dirname(target))
     await writeFile(target, code, 'utf8')
     count += 1

@@ -12,7 +12,7 @@
  * 独立群，标题取项目名，成员按原 pinned 保留 —— 数据不丢、语义变宽。
  */
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { newBridgeKey } from './bridge.ts'
@@ -91,6 +91,11 @@ function migrateV1(raw: any): { groups: Record<string, Group>; migrated: number 
 }
 
 async function load(): Promise<StoreShape> {
+  if (!sweepStarted) {
+    // 冷启动顺手清掉上次崩溃/占用留下的 .tmp 尸体：不阻塞加载，失败也不影响主流程。
+    sweepStarted = true
+    void sweepStaleTmpFiles().catch(() => 0)
+  }
   const file = filePath()
   if (!existsSync(file)) return { version: 2, defaultGroupId: '', groups: {} }
   try {
@@ -128,11 +133,55 @@ async function flush(store: StoreShape): Promise<void> {
     .then(async () => {
       await mkdir(dirname(file), { recursive: true })
       const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-      await writeFile(tmp, JSON.stringify(snapshot, null, 2), 'utf8')
-      await rename(tmp, file)
+      try {
+        await writeFile(tmp, JSON.stringify(snapshot, null, 2), 'utf8')
+        await rename(tmp, file)
+      } catch (error) {
+        // Windows 上 1.2MB 的写 + rename 会被杀软/另一实例占用搞成 EPERM，
+        // 以前这里静默吞掉 → 每失败一次就留一个 .tmp 尸体，累积几十个，
+        // 下次冷启动还要重新 parse 主库，越拖越慢。失败必须回收 tmp 并留下痕迹。
+        await removeQuietly(tmp)
+        lastWriteError = error instanceof Error ? `${error.code ?? error.name}: ${error.message}` : String(error)
+        throw error
+      }
+      lastWriteError = ''
     })
     .catch(() => undefined)
   await writing
+}
+
+/** 最近一次写盘失败的原因；成功一次即清空。供 health/diag 显示，别让失败不可见。 */
+export let lastWriteError = ''
+
+let sweepStarted = false
+
+/** 清掉崩溃/占用留下的陈旧 tmp：只留最近 10 分钟内且属于本进程的。 */
+export async function sweepStaleTmpFiles(maxAgeMilliseconds = 10 * 60 * 1000): Promise<number> {
+  const dir = dataDir()
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return 0
+  }
+  const now = Date.now()
+  let removed = 0
+  for (const name of names) {
+    if (!/\.tmp$/.test(name)) continue
+    const stamp = Number(name.slice(name.lastIndexOf('.', name.length - 4) + 1, -4))
+    if (Number.isFinite(stamp) && now - stamp < maxAgeMilliseconds && name.includes(`.${process.pid}.`)) continue
+    if (await removeQuietly(join(dir, name))) removed += 1
+  }
+  return removed
+}
+
+async function removeQuietly(target: string): Promise<boolean> {
+  try {
+    await unlink(target)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function newGroup(title: string, leadName: string): Group {
@@ -370,6 +419,17 @@ export async function markRoomMirrored(groupId: string, messageId: string): Prom
   }
   ledgerQueue = ledgerQueue.then(run, run)
   await ledgerQueue
+}
+
+/** 开关群静音：静音后 speak 不唤醒任何人（消息仍记录/入队）。 */
+export async function setMuted(groupId: string, muted: boolean): Promise<Group | undefined> {
+  const store = await load()
+  const group = store.groups[groupId]
+  if (group === undefined) return undefined
+  group.muted = muted
+  group.updatedAt = Date.now()
+  await flush(store)
+  return group
 }
 
 /** 清空某个群的镜像账本（重建群会话时用：新会话需要重新写一遍）。 */

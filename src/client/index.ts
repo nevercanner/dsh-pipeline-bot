@@ -363,6 +363,26 @@ window.__ModuleLoader__.load({
             groups.map((group) => h('option', { key: group.id, value: group.id }, `${group.title}（${group.memberCount}人）`)),
           ),
           h('span', { style: S.sub }, `${members.length} 人 · ${messages.length} 条消息`),
+
+          // 静音开关：静音后群消息只入群、不唤醒任何人（防活锁的刹车，摆到脸上）
+          h(
+            'button',
+            {
+              style: {
+                ...S.btn,
+                ...(snap?.group?.muted === true ? { borderColor: '#c0563f', color: '#e08a6f' } : {}),
+              },
+              title:
+                snap?.group?.muted === true
+                  ? '群已静音：群消息只入群，不唤醒任何人。点此恢复唤醒。'
+                  : '唤醒已开：点此静音（消息照旧入群，但谁都不会被叫醒）。',
+              onClick: () =>
+                act(async () => {
+                  await postJson('/mute', { group: groupRef, muted: snap?.group?.muted !== true })
+                }),
+            },
+            snap?.group?.muted === true ? '🔇 已静音' : '🔔 唤醒开',
+          ),
           h('span', { style: { flex: 1 } }),
           h(
             'button',

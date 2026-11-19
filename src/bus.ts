@@ -106,6 +106,32 @@ export interface SpeakResult {
  * 否则「@ 某人一句话，他回一句」这种最基本用法，回复不会出现在群里。
  * 窗口取 10 分钟：够一轮对话，又不至于把之后的闲聊也广播出去。
  */
+/**
+ * 唤醒预算：同一个群在 60 秒内最多**唤醒** 3 个成员。
+ *
+ * 为什么必须有：成员发言会被写回群，若这条又能唤醒别人，就形成
+ * 「A 发言 → 唤醒 B → B 发言 → 唤醒 C → …」的活锁。实测一次活锁让
+ * `loop跑章` 15 分钟堆 169 条消息、几十个会话并发跑 turn，
+ * 主线程被提示词组装占满，UI 直接卡死（host.hungFn ×415）。
+ *
+ * 超出预算不是丢消息：照常入队（`notify`，不唤醒），只是不把人叫起来。
+ */
+const wakeBudget = new Map<string, number[]>()
+const WAKE_BUDGET_WINDOW_MS = 60_000
+const WAKE_MAX_PER_WINDOW = 3
+
+function takeWakeSlot(groupId: string): boolean {
+  const now = Date.now()
+  const kept = (wakeBudget.get(groupId) ?? []).filter((at) => now - at < WAKE_BUDGET_WINDOW_MS)
+  if (kept.length >= WAKE_MAX_PER_WINDOW) {
+    wakeBudget.set(groupId, kept)
+    return false
+  }
+  kept.push(now)
+  wakeBudget.set(groupId, kept)
+  return true
+}
+
 const recentlyWoken = new Map<string, number>()
 const WAKE_WINDOW_MS = 10 * 60 * 1000
 
@@ -423,8 +449,35 @@ export class GroupBus {
     const group = await this.group()
     const { members, candidates } = await this.members()
     const me = this.resolveMember(members, options.from)
-    const mentioned = parseMentions(text, members)
-    const explicit = asTextList(options.targets).map((name) => this.resolveMember(members, name)?.name ?? name)
+
+    /**
+     * 唤醒闸门：只有「人手动发言」和「任务派发」可以唤醒成员。
+     *
+     * 早先成员回复也解析 @ 并唤醒（还会默认叫醒派活人），于是
+     * 「发言 → 写回群 → 再唤醒」闭环成活锁，把 UI 拖死。
+     * 现在：report / system / wake 一律**不解析 @、不唤醒**，只记录。
+     * 群被静音（group.muted）时，连人和派活也不唤醒。
+     */
+    const muted = (group as { muted?: boolean }).muted === true
+    /**
+     * 谁会唤醒谁 —— 三道闸：
+     *   ① 群静音（group.muted）时谁都不唤醒，只入群
+     *   ② 人类发言、派活（kind = "assign"）一定可以唤醒
+     *   ③ 成员之间的普通发言也可以唤醒 —— 多 agent 在群里互相唤醒干活是这套东西的
+     *      目的；一律禁掉就退化成「只有人能叫人」的转发器。
+     *      但回执（kind = "report"）永远不唤醒：回执负责收口任务、由派活方下一轮读，
+     *      若回执也互相唤醒，成员之间会互相叫醒形成活锁（2026-11-19 事故）。
+     * 唤醒次数另受 takeWakeSlot（每群 10 分钟 3 次）与 recentlyWoken 窗口限制。
+     */
+    const wakeAllowed =
+      !muted &&
+      (options.role === 'human' ||
+        options.kind === 'assign' ||
+        ((options.role === 'member' || options.role === 'external') && options.kind !== 'report'))
+    const mentioned = wakeAllowed ? parseMentions(text, members) : []
+    const explicit = wakeAllowed
+      ? asTextList(options.targets).map((name) => this.resolveMember(members, name)?.name ?? name)
+      : []
 
     const wanted: string[] = []
     // 认领会改变成员集合，所以把解析结果按名字存下来给投递阶段用 ——
@@ -440,7 +493,7 @@ export class GroupBus {
     }
 
     const lead = members.find((member) => member.role === 'lead')
-    if (wanted.length === 0 && options.silent !== true) {
+    if (wakeAllowed && wanted.length === 0 && options.silent !== true) {
       if (options.role === 'human') {
         if (lead !== undefined) wanted.push(lead.name)
       } else if (options.role === 'member' || options.role === 'external') {
@@ -493,15 +546,23 @@ export class GroupBus {
         continue
       }
       const body = this.composeWake({ options, member, members, text, group, taskId: options.taskId })
+      // 预算用尽 → 降级为「只入队不唤醒」，不丢消息，只是不再把人叫起来
+      const granted = wakeAllowed && takeWakeSlot(group.id)
+      const mode = granted ? (options.mode ?? 'steer') : 'notify'
       const result = await deliver(
         { ctx: this.deps.ctx, ...(this.deps.logger === undefined ? {} : { logger: this.deps.logger }) },
         member.sessionId,
         body,
-        options.mode ?? 'steer',
+        mode,
         { id: options.role === 'human' ? 'human' : 'pipeline-bot', name: options.from },
       )
-      if (result.ok) markWoken(member.sessionId)
-      deliveries.push({ name: member.name, sessionId: member.sessionId, detail: result.detail, ok: result.ok, outcome: result.outcome })
+      if (result.ok && granted) markWoken(member.sessionId)
+      const detail = granted
+        ? result.detail
+        : muted
+          ? `群已静音：已入队未唤醒（${result.detail}）`
+          : `唤醒预算用尽（60s/${WAKE_MAX_PER_WINDOW}）：已入队未唤醒（${result.detail}）`
+      deliveries.push({ name: member.name, sessionId: member.sessionId, detail, ok: result.ok, outcome: granted ? result.outcome : 'queued' })
     }
 
     if (deliveries.length > 0) {
@@ -515,7 +576,9 @@ export class GroupBus {
     }
 
     const note =
-      deliveries.length > 0 && deliveries.every((item) => !item.ok)
+      muted
+        ? '群已静音：消息只入群，不唤醒任何人。要恢复唤醒，在群面板点「已静音」开关。'
+        : deliveries.length > 0 && deliveries.every((item) => !item.ok)
         ? '一个都没唤醒成功，看下面每条的原因。'
         : capped.length === 0 && options.silent !== true
           ? '这条消息没有唤醒任何人（可以 @成员 或指派任务）。'

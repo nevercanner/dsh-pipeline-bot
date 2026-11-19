@@ -95,7 +95,9 @@ export function registerBusTools(deps: ToolDeps): Array<() => void> {
       const result = await bus.speak({
         from: me.name,
         role: me.role,
-        kind: 'report',
+        // 发言就是发言（kind: 'say'），不是回执：回执（report）负责收口任务、不唤醒人，
+        // 这一行若写成 'report'，pipeline_say 的「@ 谁就唤醒谁」就永远失效。
+        kind: 'say',
         text: asText(args?.text),
         ...(targets.length === 0 ? {} : { targets }),
         silent: args?.silent === true,

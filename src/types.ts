@@ -72,7 +72,7 @@ export interface Message {
   fromId?: string
   role: 'lead' | 'member' | 'human' | 'system' | 'external'
   text: string
-  kind: 'human' | 'assign' | 'report' | 'system' | 'wake'
+  kind: 'human' | 'assign' | 'say' | 'report' | 'system' | 'wake'
   taskId?: string
   /** 本条消息唤醒的成员名。 */
   targets?: string[]
@@ -121,6 +121,11 @@ export interface Group {
    * 按 id 记账是幂等的 —— 同一条群消息不管回填几次，只会写一遍。
    */
   roomMirrored?: string[]
+  /**
+   * 群静音：true 时**不唤醒任何成员**（消息照常记录、照常入队）。
+   * 用于把「成员互相唤醒」的活锁群一键停下来。
+   */
+  muted?: boolean
   createdAt: number
   updatedAt: number
 }

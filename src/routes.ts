@@ -338,6 +338,14 @@ export function registerRoutes(deps: RouteDeps): () => void {
           sendJson(res, 200, { ok: true, member: result.member, candidates: result.candidates })
           return
         }
+        /** 群静音开关：静音后群消息只入群、不唤醒任何人（防活锁的刹车，UI 可一键恢复） */
+        if (route === '/mute') {
+          const flag = body['muted']
+          const muted = flag === undefined ? true : flag === true || asText(flag).trim() === 'true'
+          const group = await store.setMuted(bus.groupId, muted)
+          sendJson(res, 200, { ok: true, group })
+          return
+        }
         if (route === '/clear') {
           const group = await bus.clear()
           await store.appendMessage(group.id, { from: 'system', role: 'system', kind: 'system', text: '群消息已清空。' })
