@@ -69,8 +69,8 @@
 **方式一：装现成的 tgz（推荐，不需要构建）**
 
 1. 下载安装包（二选一）：
-   - 仓库内：[`dist/dsh-pipeline-bot-0.5.5.tgz`](./dist/dsh-pipeline-bot-0.5.5.tgz)（点右上 Download）
-   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.5.5.tgz`
+   - 仓库内：[`dist/dsh-pipeline-bot-0.6.0.tgz`](./dist/dsh-pipeline-bot-0.6.0.tgz)（点右上 Download）
+   - 直链：`https://raw.githubusercontent.com/nevercanner/dsh-pipeline-bot/main/dist/dsh-pipeline-bot-0.6.0.tgz`
 2. DSH → 插件 → 添加插件 → 安装第三方插件 → 选择该 tgz
 3. 启用后完全退出重开
 
@@ -266,6 +266,31 @@ dsh plugin install @dsh-external/dsh-pipeline-bot    # 或用 dev_install_packag
 
 卸载时注入器会写一条 `disabled: true` 的 patch 阻断自装配；重新安装后要把它删掉，
 否则重启后仍被禁用。
+
+## 上下文交接后自动跟随（不用手动重绑）
+
+`dsh-context-bridge` 交接时会建新会话并命名 `<源会话名>-handoff`、
+第二次 `<源会话名>-handoff-2`（见其 `src/bus-names.js` 的 `SUFFIX`）。
+这个名字会写进 `.dsh-bus/names.json`，也就是候选池里的名字。
+
+于是「成员绑定的会话被交接掉」是可识别的：
+
+```
+成员 → 当前会话的总线名 X → 候选里 X-handoff / X-handoff-N 中代次最大的那条
+```
+
+命中就**自动改绑**（`bus.members()` 每次读取时顺带做，无需轮询、无需手动点）。
+
+两条安全边界：
+
+| 情况 | 行为 |
+|---|---|
+| 交接候选已被别的成员占用 | **不抢**，保持原绑定（否则两个成员指向同一会话） |
+| 找不到交接候选 | 保持原样，绝不乱改已有绑定 |
+
+> 为什么用「字符串切分」而不是正则：会话名里可能有 `.` `*` `(`，
+> 拼正则要转义，这里被写坏过一次。判定逻辑已导成 `handoffRank()`，
+> 自检用 12 个用例覆盖（含 `-handoff-2`、`#0/#1` 边界、特殊字符）。
 
 ## 热重载安全
 

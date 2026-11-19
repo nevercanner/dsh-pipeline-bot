@@ -109,6 +109,27 @@ export interface SpeakResult {
 const recentlyWoken = new Map<string, number>()
 const WAKE_WINDOW_MS = 10 * 60 * 1000
 
+/**
+ * 判断一个名字是不是 `base` 的交接接班人，返回交接代次（1 = `<base>-handoff`）。
+ *
+ * 规则来自 `dsh-context-bridge`（src/bus-names.js）：
+ *   第一次交接 `<源名>-handoff`，第二次 `<源名>-handoff-2`，依此类推。
+ * 只做字符串比较、不拼正则 —— 名字里可能有 `.` `*` `(` 这类字符，
+ * 用正则要转义，容易写错（这里就被写坏过一次）。
+ */
+export function handoffRank(name: string, base: string): number | undefined {
+  const target = asText(name).trim().toLowerCase()
+  const root = asText(base).trim().toLowerCase()
+  if (target === '' || root === '') return undefined
+  if (target === `${root}-handoff`) return 1
+  const prefix = `${root}-handoff-`
+  if (!target.startsWith(prefix)) return undefined
+  const tail = target.slice(prefix.length)
+  if (tail === '' || !/^[0-9]+$/.test(tail)) return undefined
+  const rank = Number(tail)
+  return rank >= 2 ? rank : undefined
+}
+
 export function markWoken(sessionId: string): void {
   if (sessionId === '') return
   recentlyWoken.set(sessionId, Date.now())
@@ -216,6 +237,19 @@ export class GroupBus {
       return true
     })
     const members = resolveMembers(uniqueRecords, pool.candidates, externals)
+
+    /**
+     * 自动跟随上下文交接。
+     *
+     * `dsh-context-bridge` 交接时会建新会话并给它命名 `<源会话名>-handoff`、
+     * 第二次 `<源会话名>-handoff-2`（见其 src/bus-names.js 的 SUFFIX）。
+     * 那个名字会写进 `.dsh-bus/names.json`，也就是这里的候选名。
+     *
+     * 于是「成员绑定的会话被交接掉」这件事是可识别的：只要候选池里出现
+     * `<该成员当前会话名>-handoff[-N]`，它就是接班人 —— 自动改绑，
+     * 不需要人再去手动点。找不到就保持原样，绝不动已有绑定。
+     */
+    await this.adoptHandoffs(group, members, pool.candidates)
     // 在线状态以「此刻活着没有」为准
     for (const member of members) {
       if (member.role === 'external' || member.sessionId === '') continue
@@ -804,6 +838,58 @@ export class GroupBus {
    * 用途：群成员常是「人起的名字」（跑章选手、门禁），而宿主里的会话叫
    * chapter / gate —— 名字对不上就永远叫不醒。绑定一次即可。
    */
+  /**
+   * 把「交接出来的新会话」自动接回对应成员。
+   *
+   * 判定链：成员 → 当前会话的**总线名**（候选里同 sessionId 的那条的名字）
+   *        → 候选里 `<总线名>-handoff` / `<总线名>-handoff-N` 中序号最大的一条
+   * 只在新会话确实不同于当前绑定时改绑；同一轮里一个会话只会接一个成员。
+   */
+  private async adoptHandoffs(
+    group: { id: string },
+    members: Member[],
+    candidates: readonly Candidate[],
+  ): Promise<void> {
+    const nameOfSession = new Map<string, string>()
+    for (const candidate of candidates) {
+      if (candidate.sessionId !== '' && !nameOfSession.has(candidate.sessionId)) {
+        nameOfSession.set(candidate.sessionId, normalizeName(candidate.name))
+      }
+    }
+
+    // 先把「所有成员当前已占用的会话」记进 claimed：
+    // 否则某个交接候选可能被另一个成员抢走，最后两个成员指向同一个会话。
+    const claimed = new Set<string>()
+    for (const member of members) {
+      if (member.sessionId !== '') claimed.add(member.sessionId)
+    }
+    for (const member of members) {
+      if (member.role === 'external') continue
+      const base = nameOfSession.get(member.sessionId)
+      if (base === undefined || base === '') continue
+      let best: { sessionId: string; rank: number; at: number } | undefined
+      for (const candidate of candidates) {
+        if (candidate.sessionId === '') continue
+        if (candidate.sessionId === member.sessionId) continue
+        if (claimed.has(candidate.sessionId)) continue
+        const rank = handoffRank(candidate.name, base)
+        if (rank === undefined) continue
+        const at = candidate.updatedAt ?? 0
+        if (best === undefined || rank > best.rank || (rank === best.rank && at > best.at)) {
+          best = { sessionId: candidate.sessionId, rank, at }
+        }
+      }
+      if (best === undefined) continue
+      claimed.delete(member.sessionId)
+      claimed.add(best.sessionId)
+      await bindSession(group.id, member.name, best.sessionId)
+      member.sessionId = best.sessionId
+      this.deps.logger?.info?.(
+        `[dsh-pipeline-bot] 交接自动跟随：${member.name} → ${best.sessionId}（${base}-handoff${best.rank > 1 ? '-' + best.rank : ''}）`,
+      )
+    }
+  }
+
   async bindMember(memberName: string, to: string): Promise<{ member: Member; candidates: string[] }> {
     const group = await this.group()
     const { members, candidates } = await this.members()

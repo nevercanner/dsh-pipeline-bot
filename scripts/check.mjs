@@ -381,6 +381,32 @@ const passthrough = await listeners['agent/pre-step'](
 passthrough?.kind === 'enter' ? ok('普通会话不受影响') : bad('普通会话被误拦截')
 relay.dispose()
 
+// ── 交接自动跟随：命名判定必须与 dsh-context-bridge 的规则一致 ──
+{
+  const { handoffRank } = await import(new URL('../lib/bus.js', import.meta.url).href)
+  const cases = [
+    ['chapter-handoff', 'chapter', 1],
+    ['chapter-handoff-2', 'chapter', 2],
+    ['chapter-handoff-13', 'chapter', 13],
+    ['cast-handoff-2', 'cast', 2],
+    ['chapter-handoff-x', 'chapter', undefined],
+    ['chapter-handoff-0', 'chapter', undefined],
+    ['chapter-handoff-1', 'chapter', undefined],
+    ['跑章选手-handoff', '跑章选手', 1],
+    ['chapter', 'chapter', undefined],
+    ['chapter-handoff', 'cast', undefined],
+    ['a.b-handoff', 'a.b', 1],
+    ['a.b*handoff', 'a.b', undefined],
+  ]
+  const wrong = []
+  for (const [name, base, want] of cases) {
+    const got = handoffRank(name, base)
+    if (got !== want) wrong.push(`${name}/${base} → ${got} 期望 ${want}`)
+  }
+  if (wrong.length === 0) ok(`交接接班人命名判定正确（${cases.length} 个用例）`)
+  else bad('交接命名判定错误', wrong.join('; '))
+}
+
 // 清理自检数据
 const { rmSync } = await import('node:fs')
 rmSync(process.env.DSH_HOME, { recursive: true, force: true })
