@@ -35,6 +35,67 @@ export interface DeliverOptions {
   logger?: { info?(message: string): void; warn?(message: string): void }
 }
 
+/**
+ * 群消息门禁（`@dsh-external/dsh-tool-toggle` 提供的 `groupGate` 服务）。
+ *
+ * 为什么必须在这一层收敛：宿主**没有**「入箱之前」的 waterfall —— 消息一旦
+ * `agent.send` 进 inbox，就只剩后置事件 `agent/inbox/inserted` 可观测，
+ * 既不能拒绝也不能改顺序；而 `Inbox.claim()` 对 `next-step` 是**整体取走**，
+ * 群内互发一密就被合并成一轮并发处理。发送方是唯一「还没进箱」的位置。
+ *
+ * 门禁不存在（插件未加载 / 被禁用）时返回 undefined，调用方保留原直发路径。
+ */
+function gateService(ctx: any):
+  | {
+      enqueue?: (
+        agentId: string,
+        input: { id?: string; from?: string; text: string },
+      ) => { accepted: boolean; detail: string; length: number; limit: number }
+    }
+  | undefined {
+  try {
+    const gate = ctx?.get?.('groupGate') ?? ctx?.groupGate
+    return gate ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 把一条群消息交给门禁排队（串行 + FIFO + 超限回执）。
+ *
+ * @returns 走门禁时的投递结果；返回 undefined 表示「门禁不在，走原路径」。
+ */
+function deliverViaGate(
+  options: DeliverOptions,
+  target: string,
+  text: string,
+  messageId: string,
+  senderName: string,
+  mode: DeliveryMode,
+): DeliverResult | undefined {
+  // notify 是「入箱不唤醒」的信箱语义，不参与排队
+  if (mode === 'notify') return undefined
+  const gate = gateService(options.ctx)
+  if (gate === undefined || typeof gate.enqueue !== 'function') return undefined
+  const result = gate.enqueue(target, {
+    ...(messageId === '' ? {} : { id: messageId }),
+    from: senderName === '' ? 'pipeline' : senderName,
+    text,
+  })
+  if (!result.accepted) {
+    // 回执发送方：detail 已含「队列已满（N/limit），消息未入队」
+    return { ok: false, live: true, outcome: 'failed', detail: result.detail, sessionId: target }
+  }
+  return {
+    ok: true,
+    live: true,
+    outcome: 'queued',
+    detail: `已进门禁：${result.detail}（排队 ${result.length}/${result.limit}）`,
+    sessionId: target,
+  }
+}
+
 function agentOf(ctx: any, sessionId: string): any {
   try {
     const agents = ctx?.get?.('agents') ?? ctx?.agents
@@ -215,6 +276,17 @@ export async function deliver(
   }
 
   const message = await buildMessage(text, sender)
+  // 群消息统一收敛到门禁：入箱前排队（串行/FIFO/超限回执）。
+  // 门禁不在时返回 undefined → 继续走下面的直发路径（旁路，仅能被 inserted 观测）。
+  const viaGate = deliverViaGate(
+    options,
+    target,
+    text,
+    String((message as { id?: string })?.id ?? ''),
+    String(sender?.name ?? sender?.id ?? ''),
+    mode,
+  )
+  if (viaGate !== undefined) return viaGate
   try {
     if (mode === 'notify') {
       if (typeof agent.inject === 'function') agent.inject(message)
